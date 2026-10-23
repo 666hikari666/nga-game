@@ -38,16 +38,49 @@ F2 = F2[(F2[:, 0] != F2[:, 1]) & (F2[:, 1] != F2[:, 2]) & (F2[:, 0] != F2[:, 2])
 s = np.sort(F2, 1); _, ui = np.unique(s[:, 0] * 10**12 + s[:, 1] * 10**6 + s[:, 2], return_index=True); F2 = F2[np.sort(ui)]
 print('verts', len(V2), 'tris', len(F2))
 
-# распил: часть по центру треугольника
+# распил: часть по центру треугольника. Части перекрываются у суставов (OV),
+# чтобы при сгибе руки/ноги не было дыр между частью и телом.
 SC = 2.8                                         # высота модели в единицах рига старых персов
-cen = V2[F2].mean(1); cx, cy = cen[:, 0], cen[:, 1]
-arm = (np.abs(cx) > 0.122) & (cy > 0.27) & (cy < 0.645)
-part = np.full(len(F2), 'torso', object)
-part[cy > 0.665] = 'head'
-part[(cy < 0.355) & ~arm] = np.where(cx[(cy < 0.355) & ~arm] < 0, 'legL', 'legR')
-part[arm] = np.where(cx[arm] < 0, 'armL', 'armR')
+OV = 0.035
+T = V2[F2]; cen = T.mean(1); cx, cy = cen[:, 0], cen[:, 1]
+tn = np.cross(T[:, 1] - T[:, 0], T[:, 2] - T[:, 0]); tn /= np.linalg.norm(tn, axis=1, keepdims=True) + 1e-12
+ax = np.abs(cx)
+armZ = lambda m: (ax > 0.122 - m) & (cy > 0.27 - m) & (cy < 0.645 + m)
+parts = {
+  'head':  cy > 0.665 - OV,
+  'torso': (cy > 0.355 - OV) & (cy < 0.665 + OV) & ~((ax > 0.122 + OV) & (cy < 0.645 - OV)),
+  'legL':  (cy < 0.355 + OV) & (cx < 0.01) & ~armZ(0),
+  'legR':  (cy < 0.355 + OV) & (cx > -0.01) & ~armZ(0),
+  'armL':  armZ(OV) & (cx < 0),
+  'armR':  armZ(OV) & (cx > 0),
+}
+# лицо: передние треугольники головы — отдельная часть с текстурой эмоций
+FB = (-0.105, 0.105, 0.672, 0.845)
+face = (cy > FB[2]) & (cy < FB[3]) & (cx > FB[0]) & (cx < FB[1]) & (tn[:, 2] > 0.3)
+cz = cen[:, 2]
+# Чёлка модели висит перед лицом, а под ней нет лба. Поэтому всё лицо (вместе с чёлкой над глазами)
+# заменяем гладкой «маской»: сетка по форме лица модели, на неё ложится текстура эмоций.
+fringe = (cy > 0.735) & (cy < FB[3]) & (cx > FB[0]) & (cx < FB[1]) & (cz > 0.176) & ~((np.abs(cx) < 0.025) & (cy < 0.785))
+parts['head'] &= ~face & ~fringe
+GX, GY = 16, 16
+gx = np.linspace(FB[0], FB[1], GX); gy = np.linspace(FB[2], FB[3], GY)
+skinv = (lab == 'skin') & (V[:, 2] < 0.176) & (V[:, 1] > FB[2] - 0.02)
+SV = V[skinv]
+depth = np.zeros((GY, GX))
+for j, yy in enumerate(gy):
+    for i, xx in enumerate(gx):
+        near = SV[(np.abs(SV[:, 0] - xx) < 0.012) & (np.abs(SV[:, 1] - yy) < 0.012)]
+        depth[j, i] = np.percentile(near[:, 2], 80) if len(near) else np.nan
+# пустые клетки (лоб под чёлкой) — по ближайшим снизу/сбоку
+for _ in range(40):
+    m = np.isnan(depth)
+    if not m.any(): break
+    pad = np.pad(depth, 1, constant_values=np.nan)
+    nb = np.stack([pad[:-2, 1:-1], pad[2:, 1:-1], pad[1:-1, :-2], pad[1:-1, 2:]])
+    depth[m] = np.nanmean(nb, 0)[m]
+depth = np.nan_to_num(depth, nan=0.15) + 0.004    # чуть вперёд, чтобы не утонуть в голове
 PIV = {'torso': (0, 0, 0), 'head': (0, 0.665, 0), 'legL': (-0.06, 0.355, 0), 'legR': (0.06, 0.355, 0),
-       'armL': (-0.15, 0.62, 0), 'armR': (0.15, 0.62, 0)}
+       'armL': (-0.15, 0.62, 0), 'armR': (0.15, 0.62, 0), 'face': (0, 0.665, 0)}
 
 bin_ = bytearray(); bviews = []; accs = []; meshes = []; nodes = []
 def add(arr, target, ctype, typ, norm=False, mm=False):
@@ -59,15 +92,26 @@ def add(arr, target, ctype, typ, norm=False, mm=False):
     if mm: a['min'] = arr.min(0).tolist(); a['max'] = arr.max(0).tolist()
     accs.append(a); return len(accs) - 1
 for name, pv in PIV.items():
-    f = F2[part == name]
-    used, local = np.unique(f, return_inverse=True)
-    P = ((V2[used] - np.array(pv)) * SC).astype('<f4')
-    Cc = np.clip(C2[used], 0, 255).astype(np.uint8)
-    Cc = np.concatenate([Cc, np.full((len(Cc), 1), 255, np.uint8)], 1)
-    I = local.reshape(-1).astype('<u4')
-    meshes.append({'name': name, 'primitives': [{'attributes': {
-        'POSITION': add(P, 34962, 5126, 'VEC3', mm=True), 'COLOR_0': add(Cc, 34962, 5121, 'VEC4', norm=True)},
-        'indices': add(I, 34963, 5125, 'SCALAR'), 'material': 0}]})
+    if name == 'face':                           # маска лица: сетка GX×GY, UV — по рамке лица
+        XX, YY = np.meshgrid(gx, gy)
+        Vg = np.stack([XX.ravel(), YY.ravel(), depth.ravel()], 1)
+        P = ((Vg - np.array(pv)) * SC).astype('<f4')
+        attrs = {'POSITION': add(P, 34962, 5126, 'VEC3', mm=True)}
+        u = (XX.ravel() - FB[0]) / (FB[1] - FB[0]); v = (YY.ravel() - FB[2]) / (FB[3] - FB[2])
+        attrs['TEXCOORD_0'] = add(np.stack([u, v], 1).astype('<f4'), 34962, 5126, 'VEC2')   # текстура в игре грузится с flipY
+        q = [(j * GX + i, j * GX + i + 1, (j + 1) * GX + i + 1, (j + 1) * GX + i) for j in range(GY - 1) for i in range(GX - 1)]
+        local = np.array([[a, b, c] for a, b, c, d in q] + [[a, c, d] for a, b, c, d in q])
+        f = local
+    else:
+        f = F2[parts[name]]
+        used, local = np.unique(f, return_inverse=True)
+        P = ((V2[used] - np.array(pv)) * SC).astype('<f4')
+        attrs = {'POSITION': add(P, 34962, 5126, 'VEC3', mm=True)}
+    if name != 'face':
+        Cc = np.clip(C2[used], 0, 255).astype(np.uint8)
+        attrs['COLOR_0'] = add(np.concatenate([Cc, np.full((len(Cc), 1), 255, np.uint8)], 1), 34962, 5121, 'VEC4', norm=True)
+    meshes.append({'name': name, 'primitives': [{'attributes': attrs,
+        'indices': add(local.reshape(-1).astype('<u4'), 34963, 5125, 'SCALAR'), 'material': 0}]})
     nodes.append({'name': name, 'mesh': len(meshes) - 1, 'translation': [v * SC for v in pv]})
     print(name, len(f))
 j = {'asset': {'version': '2.0', 'generator': 'nga build.py'}, 'scene': 0, 'scenes': [{'nodes': list(range(len(nodes)))}],

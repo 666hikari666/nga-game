@@ -773,11 +773,20 @@ function updatePuffs(dt) {
 // Персы с готовой 3D-моделью: модель распилена на части (голова, торс, руки, ноги),
 // каждая с осью вращения в суставе — поэтому работает та же анимация, что у коробочных
 const MODELS = {};
+// Эмоции 3D-моделей: assets/chars/<id>/face3d_<эмоция>.png (нарезаны из листа эмоций)
+const FACE_NAMES = ['neutral', 'smug', 'laughing', 'rage', 'panic', 'crying', 'plotting_evil', 'confused', 'dead_inside', 'shocked', 'cocky_grin', 'disgusted'];
+const FACES = {};
+for (const c of CHARACTERS.filter(c => c.model)) {
+  FACES[c.id] = {};
+  for (const n of FACE_NAMES) new THREE.TextureLoader().load(`assets/chars/${c.id}/face3d_${n}.png`, t => {
+    t.colorSpace = THREE.SRGBColorSpace; t.magFilter = THREE.NearestFilter; FACES[c.id][n] = t;
+  }, undefined, () => {});
+}
 const toLinear = v => v < 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 await Promise.all(CHARACTERS.filter(c => c.model).map(c => new GLTFLoader().loadAsync(c.model).then(g => {
   const m = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
   g.scene.traverse(o => {
-    if (!o.isMesh) return;
+    if (!o.isMesh || !o.geometry.attributes.color) return;      // лицо красится текстурой, не цветами вершин
     const col = o.geometry.attributes.color, rgb = new Float32Array(col.count * 3);   // цвета в файле — sRGB
     for (let i = 0; i < col.count; i++) for (let k = 0; k < 3; k++)
       rgb[i * 3 + k] = toLinear([col.getX, col.getY, col.getZ][k].call(col, i));
@@ -797,7 +806,11 @@ function makeModelCharacter(c) {
   const body = new THREE.Group(); body.scale.setScalar(1.12); rig.add(body);   // модель чуть мельче коробочных — подгоняем
   const src = MODELS[c.id], get = n => { const o = src.getObjectByName(n).clone(); body.add(o); return o; };
   get('torso');
-  const head = get('head'), legs = [get('legL'), get('legR')], arms = [get('armL'), get('armR')];
+  const head = get('head'), face = get('face');
+  head.add(face); face.position.set(0, 0, 0);                   // лицо — часть головы, у них одна ось
+  const faceMat = new THREE.MeshLambertMaterial({ map: FACES[c.id]?.neutral || null, flatShading: true });
+  face.material = faceMat;
+  const legs = [get('legL'), get('legR')], arms = [get('armL'), get('armR')];
   const hands = arms.map(a => { const g = new THREE.Group(); g.position.set(0, -0.85, 0.02); a.add(g); return g; });
   if (c.right) prop(hands[0], c.right);
   if (c.left) prop(hands[1], c.left);
@@ -807,7 +820,12 @@ function makeModelCharacter(c) {
     new THREE.MeshLambertMaterial({ color: '#FF8A2B', emissive: '#5a2a00', transparent: true, opacity: 0.9, flatShading: true })));
   const foam = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.12, 8), mat('#f4efe2')); foam.position.y = 0.29; mug.add(foam);
   part(mug, 0.06, 0.32, 0.18, '#C9D3E0', 0.27, 0, 0);
-  return { root, rig, head, legs, arms, shadow, mug, setMood() {} };
+  // calm/happy — как у коробочных; можно и прямо имя эмоции из FACE_NAMES
+  const setMood = mood => {
+    const t = FACES[c.id]?.[{ calm: 'neutral', happy: 'laughing' }[mood] || mood];
+    if (t && faceMat.map !== t) { faceMat.map = t; faceMat.needsUpdate = true; }
+  };
+  return { root, rig, head, legs, arms, shadow, mug, setMood };
 }
 const _makeBoxCharacter = makeCharacter;
 makeCharacter = c => MODELS[c.id] ? makeModelCharacter(c) : _makeBoxCharacter(c);
@@ -882,6 +900,7 @@ const JUMP_POWER = 7;           // сила прыжка (больше = выш�
 const GRAVITY = 22;             // как быстро падает обратно
 const SIT_TIME = 0.7;           // сколько секунд садится за комп
 const BUZZ_DURATION = 15;     // сколько секунд держится «мыло» после пива
+let emote = 0, emoteT = 0;   // эмоция по кнопке E
 let drinkTime = 0, nearBar = false, buzzTime = 0, soap = 0;
 const promptEl = document.getElementById('prompt');
 const promptTextEl = document.getElementById('promptText');
@@ -903,6 +922,7 @@ addEventListener('keydown', e => {
     if (e.code === 'Enter' || e.code === 'Space') startGame(highlighted);
   } else if (e.code === 'Escape') backToSelect();
   else if (e.code === 'KeyF' && nearBar && drinkTime <= 0) { drinkTime = DRINK_DURATION; SFX.can(); }
+  else if (e.code === 'KeyE' && !e.repeat) { emote = (emote + 1) % FACE_NAMES.length; emoteT = 3; SFX.click(); }
   else if (e.code === 'Space' && !e.repeat && player.jumpY === 0 && drinkTime <= 0) { player.vy = JUMP_POWER; SFX.jump(); }
   else if (e.code === 'KeyF' && nearPC && drinkTime <= 0 && player.jumpY === 0) { enterPC(nearPC); SFX.click(); }
   else if (e.code === 'KeyF' && nearSlot && drinkTime <= 0 && player.jumpY === 0) { enterSlot(nearSlot); SFX.coin(); }
@@ -1036,7 +1056,9 @@ function update(dt, t) {
 
   // После пива: весёлое лицо и мыльный экран на 15 секунд
   if (buzzTime > 0) buzzTime = Math.max(0, buzzTime - dt);
-  p.setMood(buzzTime > 0 ? 'happy' : 'calm');
+  // лицо: эмоция по кнопке E (3 с) → удивление в прыжке → после пива смеётся → обычное
+  if (emoteT > 0) emoteT -= dt;
+  p.setMood(emoteT > 0 ? FACE_NAMES[emote] : player.jumpY > 0.3 ? 'shocked' : buzzTime > 0 ? 'happy' : 'calm');
   soap = buzzTime > 0 ? Math.min(1, (BUZZ_DURATION - buzzTime) * 1.5, buzzTime / 3) : 0;  // плавно вкл/выкл
   renderer.domElement.style.filter = soap > 0
     ? `blur(${2.5 * soap}px) saturate(${1 + 0.8 * soap}) hue-rotate(${Math.sin(t * 1.7) * 30 * soap}deg)`
@@ -1095,7 +1117,7 @@ function update(dt, t) {
   }
 
   osdMode.textContent = 'PLAY ▶ ' + c.name;
-  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · ESC — назад';
+  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · E — эмоция · ESC — назад';
 }
 
 // ---------------------------------------------------------------------
@@ -1156,10 +1178,10 @@ function netTick(t, dt) {
   const s = current === null ? { c: null } : {
     c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle),
     vx: moving ? r2(velX) : 0, vz: moving ? r2(velZ) : 0, jt: jumpAt,
-    m: moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
+    e: emoteT > 0 ? emote : -1, m: moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
   };
   const p = netSent;
-  let need = !p || t - netSentAt > NET_BEAT || ['c', 'm', 'd', 'u', 'b', 'sit', 'jt'].some(k => p[k] !== s[k]);
+  let need = !p || t - netSentAt > NET_BEAT || ['c', 'e', 'm', 'd', 'u', 'b', 'sit', 'jt'].some(k => p[k] !== s[k]);
   if (!need && s.c != null) {
     const age = t - netSentAt, px = p.x + p.vx * age, pz = p.z + p.vz * age;   // где перс у друга сейчас
     need = Math.hypot(px - s.x, pz - s.z) > 1 || Math.hypot(p.vx - s.vx, p.vz - s.vz) > 1.5 || (!s.m && Math.abs(p.a - s.a) > 0.6);
@@ -1194,7 +1216,7 @@ function updateRemotes(dt) {
     m.arms[0].rotation.x = s.u ? -2.4 : s.sit ? -1.1 : -swing * 0.8;
     m.arms[1].rotation.x = s.d ? -2.5 : s.sit ? -1.1 : swing * 0.8;
     m.mug.visible = !!s.d;
-    m.setMood(s.b ? 'happy' : 'calm');
+    m.setMood(s.e >= 0 ? FACE_NAMES[s.e] : s.b ? 'happy' : 'calm');
   }
 }
 
