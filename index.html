@@ -51,7 +51,8 @@
   @keyframes blink { 50% { opacity: 0; } }
 </style>
 <script type="importmap">
-  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
 </script>
 </head>
 <body>
@@ -76,6 +77,7 @@
 <script type="module" src="firebase-net.js"></script>
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { openSlots, slotsOpen } from './slots/slots.js';
 
 // =====================================================================
@@ -100,7 +102,8 @@ const ASSETS = {
 const CHARACTERS = [
   { id: 'danya', name: 'ДАНЯ', role: 'тимлид, хаос',       color: '#7CFF5B', speed: 6, skin: '#e9ac7f',
     size: 1.0, wide: 1.0, hair: 'shaggy', hairColor: '#5e3420', shirt: '#1d1a24', pants: '#18161e',
-    shoes: '#8f8672', phones: null, hoodie: true, earrings: true, right: 'can', left: null },
+    shoes: '#8f8672', phones: null, hoodie: true, earrings: true, right: 'can', left: null,
+    model: 'assets/models/danya.glb' },   // 3D-модель (раскрашена и распилена assets/models/build.py)
   { id: 'yarik', name: 'ЯРИК', role: 'спокойный работяга', color: '#2EE6FF', speed: 4, skin: '#e8ab7f',
     size: 0.93, wide: 1.15, hair: 'short', hairColor: '#5e3420', shirt: '#1d1a24', pants: '#18161e',
     shoes: '#1a181e', phones: 'head', hoodie: false, earrings: false, right: 'shawarma', left: null },
@@ -651,7 +654,7 @@ function headphones(parent, c, y, onHead) {
   else part(g, 0.66, 0.08, 0.1, '#18161e', 0, 0.12, -0.05);
 }
 
-function makeCharacter(c) {
+let makeCharacter = function (c) {
   const root = new THREE.Group();
   const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.55, 12),
     new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: 0.45 }));
@@ -766,6 +769,48 @@ function updatePuffs(dt) {
     if (p.life > 2.5) { scene.remove(p.m); puffs.splice(i, 1); }
   }
 }
+
+// Персы с готовой 3D-моделью: модель распилена на части (голова, торс, руки, ноги),
+// каждая с осью вращения в суставе — поэтому работает та же анимация, что у коробочных
+const MODELS = {};
+const toLinear = v => v < 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+await Promise.all(CHARACTERS.filter(c => c.model).map(c => new GLTFLoader().loadAsync(c.model).then(g => {
+  const m = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+  g.scene.traverse(o => {
+    if (!o.isMesh) return;
+    const col = o.geometry.attributes.color, rgb = new Float32Array(col.count * 3);   // цвета в файле — sRGB
+    for (let i = 0; i < col.count; i++) for (let k = 0; k < 3; k++)
+      rgb[i * 3 + k] = toLinear([col.getX, col.getY, col.getZ][k].call(col, i));
+    o.geometry.setAttribute('color', new THREE.BufferAttribute(rgb, 3));
+    o.material = m;
+  });
+  MODELS[c.id] = g.scene;
+}).catch(e => console.warn('модель не загрузилась', c.model, e))));   // будет коробочный перс
+
+function makeModelCharacter(c) {
+  const root = new THREE.Group();
+  const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.55, 12),
+    new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: 0.45 }));
+  shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.02;
+  const rig = new THREE.Group(); rig.scale.setScalar(c.size * 0.85);
+  root.add(shadow, rig);
+  const body = new THREE.Group(); body.scale.setScalar(1.12); rig.add(body);   // модель чуть мельче коробочных — подгоняем
+  const src = MODELS[c.id], get = n => { const o = src.getObjectByName(n).clone(); body.add(o); return o; };
+  get('torso');
+  const head = get('head'), legs = [get('legL'), get('legR')], arms = [get('armL'), get('armR')];
+  const hands = arms.map(a => { const g = new THREE.Group(); g.position.set(0, -0.85, 0.02); a.add(g); return g; });
+  if (c.right) prop(hands[0], c.right);
+  if (c.left) prop(hands[1], c.left);
+  // пивная кружка (как у коробочных), видна только когда пьёт
+  const mug = new THREE.Group(); mug.position.set(0, -0.85, 0.25); mug.visible = false; arms[1].add(mug);
+  mug.add(new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.5, 8),
+    new THREE.MeshLambertMaterial({ color: '#FF8A2B', emissive: '#5a2a00', transparent: true, opacity: 0.9, flatShading: true })));
+  const foam = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.12, 8), mat('#f4efe2')); foam.position.y = 0.29; mug.add(foam);
+  part(mug, 0.06, 0.32, 0.18, '#C9D3E0', 0.27, 0, 0);
+  return { root, rig, head, legs, arms, shadow, mug, setMood() {} };
+}
+const _makeBoxCharacter = makeCharacter;
+makeCharacter = c => MODELS[c.id] ? makeModelCharacter(c) : _makeBoxCharacter(c);
 
 const players = CHARACTERS.map(makeCharacter);
 let current = null;                                   // индекс выбранного или null
