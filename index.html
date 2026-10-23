@@ -35,6 +35,9 @@
                  animation: pulse .8s ease-in-out infinite alternate; }
   @keyframes pulse { from { box-shadow: 0 0 6px #FF8A2B; transform: scale(1); } to { box-shadow: 0 0 26px #FF8A2B; transform: scale(1.12); } }
 
+  /* ===== Затемнение при переходе между этажами ===== */
+  #fade { position: absolute; inset: 0; background: #000; opacity: 0; transition: opacity .35s; pointer-events: none; z-index: 3; }
+
   /* ===== VHS-оверлей (чистый CSS) ===== */
   .vhs { position: absolute; inset: 0; pointer-events: none; }
   .scanlines { background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.28) 2px 4px); }
@@ -63,6 +66,7 @@
     <div class="cards" id="cards"></div>
   </div>
   <div id="prompt" class="hidden"><span class="key">F</span><span id="promptText">ВЫПИТЬ ПИВА</span></div>
+  <div id="fade"></div>
   <div class="vhs tracking"></div>
   <div class="vhs scanlines"></div>
   <div class="vhs vignette"></div>
@@ -138,11 +142,18 @@ wrap.prepend(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#1A1424');
 scene.fog = new THREE.Fog('#1A1424', 14, 30);
-const camera = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 100);
+const camera = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 1200);   // далеко — чтобы с террасы была видна пустыня
 
 // Комната: X от -12 до 12, Z от -8 (дальняя стена, бар) до 8, высота 5
 const ROOM = { x: 12, z: 8, h: 5 };
-const obstacles = [];   // прямоугольники, через которые нельзя пройти
+const obstacles = [];   // прямоугольники, через которые нельзя пройти (f — этаж)
+// Этажи: 0 — подвал, 1 — второй этаж с террасой (стоит прямо на потолке подвала)
+const Y2 = 5.3;
+const floorY = f => f ? Y2 : 0;
+let BUILD_FLOOR = 0;                     // какой этаж сейчас строим: свет и препятствия запоминают этаж
+const lightsByFloor = [[], []];          // свет одного этажа выключается, пока мы на другом
+const hookahs = [];                      // кальяны: { x, z, f, top, coal }
+let ambient, hemi;                       // общий свет — днём/ночью на террасе меняется
 
 // Пиксельная «грязная» текстура из шума
 function noiseTex(base, spread = 18, size = 32, stains = 0) {
@@ -179,7 +190,7 @@ const M = {
 function box(w, h, d, x, y, z, material, collide = false) {
   const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
   m.position.set(x, y + h / 2, z); scene.add(m);
-  if (collide) obstacles.push({ x1: x - w / 2, x2: x + w / 2, z1: z - d / 2, z2: z + d / 2 });
+  if (collide) obstacles.push({ x1: x - w / 2, x2: x + w / 2, z1: z - d / 2, z2: z + d / 2, f: BUILD_FLOOR });
   return m;
 }
 function cyl(r, h, x, y, z, material, seg = 8, rotZ = 0, rotX = 0) {
@@ -189,6 +200,62 @@ function cyl(r, h, x, y, z, material, seg = 8, rotZ = 0, rotX = 0) {
 }
 function light(color, x, y, z, power = 25, dist = 14) {
   const l = new THREE.PointLight(color, power, dist, 1.2); l.position.set(x, y, z); scene.add(l);
+  lightsByFloor[BUILD_FLOOR].push(l);
+  return l;
+}
+// Неоновая надпись на прозрачной плашке
+function neonSign(text, shadow, fill, w, h, px = 84) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 128;
+  const g = c.getContext('2d');
+  g.font = `bold ${px}px Impact, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.shadowColor = shadow; g.shadowBlur = 18; g.fillStyle = fill;
+  g.fillText(text, 256, 66); g.fillText(text, 256, 66);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ map: t, transparent: true }));
+}
+// Восточный ковёр: рамка, ромб в центре (пиксельный, как всё остальное)
+function rugTex(bg = '#6b1d2f', mid = '#2a1640') {
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = bg; g.fillRect(0, 0, 32, 32);
+  g.fillStyle = '#c9a227'; g.fillRect(2, 2, 28, 2); g.fillRect(2, 28, 28, 2); g.fillRect(2, 2, 2, 28); g.fillRect(28, 2, 2, 28);
+  for (let y = 0; y < 32; y++) for (let x = 0; x < 32; x++) {
+    const d = Math.abs(x - 15.5) + Math.abs(y - 15.5);
+    if (d < 10) { g.fillStyle = d < 4 ? '#e8334a' : d < 6 ? '#c9a227' : mid; g.fillRect(x, y, 1, 1); }
+  }
+  g.fillStyle = '#2EE6FF'; for (const [x, y] of [[7, 7], [24, 7], [7, 24], [24, 24]]) g.fillRect(x, y, 2, 2);
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+// Кальян: колба, шахта, блюдце, чаша с углями и шланг до мундштука (end — точка в мире)
+function hookah(x, z, y0, color, end, s = 1) {
+  const g = new THREE.Group(); g.position.set(x, y0, z); g.scale.setScalar(s); scene.add(g);
+  const add = (geo, m, px, py, pz) => { const o = new THREE.Mesh(geo, m); o.position.set(px, py, pz); g.add(o); return o; };
+  const prof = [[0, 0], [0.2, 0.02], [0.29, 0.12], [0.3, 0.24], [0.22, 0.36], [0.09, 0.44], [0.06, 0.5]]
+    .map(([a, b]) => new THREE.Vector2(a, b));
+  add(new THREE.LatheGeometry(prof, 8), new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.35,
+    transparent: true, opacity: 0.85, flatShading: true }), 0, 0, 0);                        // колба
+  add(new THREE.CylinderGeometry(0.035, 0.045, 0.6, 6), M.chrome, 0, 0.78, 0);              // шахта
+  for (const y of [0.6, 0.82]) add(new THREE.CylinderGeometry(0.075, 0.075, 0.04, 8), mat('#c9a227'), 0, y, 0);
+  add(new THREE.CylinderGeometry(0.2, 0.2, 0.025, 10), M.chrome, 0, 0.98, 0);               // блюдце
+  add(new THREE.CylinderGeometry(0.1, 0.06, 0.14, 8), mat('#8a3b22'), 0, 1.07, 0);          // чаша
+  const coal = new THREE.MeshBasicMaterial({ color: '#ff5a1f' });
+  for (const [cx, cz] of [[-0.03, 0.02], [0.03, -0.02], [0, 0.035]])
+    add(new THREE.BoxGeometry(0.05, 0.035, 0.05), coal, cx, 1.155, cz);                     // угли
+  // шланг: от штуцера вниз, провисает до пола и поднимается к мундштуку
+  const e = new THREE.Vector3(...end).sub(g.position).divideScalar(s);
+  const dir = new THREE.Vector3(e.x, 0, e.z).normalize(), fl = -y0 / s + 0.04;
+  const curve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(dir.x * 0.06, 0.62, dir.z * 0.06),
+    new THREE.Vector3(dir.x * 0.25, 0.45, dir.z * 0.25),
+    new THREE.Vector3(e.x * 0.5, fl, e.z * 0.5),
+    new THREE.Vector3(e.x * 0.85, (fl + e.y) / 2, e.z * 0.85),
+    e,
+  ]);
+  g.add(new THREE.Mesh(new THREE.TubeGeometry(curve, 24, 0.022, 5), mat('#2b2233')));
+  add(new THREE.CylinderGeometry(0.03, 0.02, 0.14, 6), M.chrome, e.x, e.y + 0.05, e.z);    // мундштук
+  if (y0 === 0) obstacles.push({ x1: x - 0.32 * s, x2: x + 0.32 * s, z1: z - 0.32 * s, z2: z + 0.32 * s, f: BUILD_FLOOR });
+  hookahs.push({ x, z, f: BUILD_FLOOR, top: new THREE.Vector3(x, y0 + 1.2 * s, z), coal });
 }
 
 // ---------------------------------------------------------------------
@@ -219,6 +286,7 @@ function buildClub() {
   box(ROOM.x * 2, ROOM.h, 0.5, 0, 0, -ROOM.z - 0.25, M.concrete);                // дальняя стена
   box(0.5, ROOM.h, ROOM.z * 2, -ROOM.x - 0.25, 0, 0, M.concrete);                // левая
   box(0.5, ROOM.h, ROOM.z * 2,  ROOM.x + 0.25, 0, 0, M.concrete);                // правая
+  box(ROOM.x * 2, ROOM.h, 0.5, 0, 0, ROOM.z + 0.25, M.concrete);                 // передняя (камера крутится — видно)
   box(ROOM.x * 2, 0.3, ROOM.z * 2, 0, ROOM.h, 0, M.dark);                        // потолок
   for (let z = -6; z <= 6; z += 4) box(ROOM.x * 2, 0.4, 0.5, 0, ROOM.h - 0.4, z, M.iron); // балки
   cyl(0.25, ROOM.x * 2, 0, ROOM.h - 0.8, -7, M.iron, 8, Math.PI / 2);            // трубы
@@ -321,17 +389,389 @@ function buildClub() {
   light('#ff3df0', 7.4, 2.8, -6.2, 18, 7);
 
   // ----- Хлам: коробки и VHS по краям -----
-  for (const [x, z, s] of [[-10.5, 6.5, 1.2], [-9.4, 6.9, 0.9], [-10.6, 5.2, 0.8], [10.6, 6.6, 1.2], [9.3, 7, 1], [10.4, 5.4, 0.7]])
+  // (левые коробки подвинуты правее — в левом углу теперь лаунж)
+  for (const [x, z, s] of [[-4.6, 7.3, 1.2], [-3.4, 7.45, 0.9], [-4.5, 6.1, 0.8], [10.6, 6.6, 1.2], [9.3, 7, 1], [10.4, 5.4, 0.7]])
     box(s, s, s, x, 0, z, M.box, true);
-  for (const [x, z] of [[-6.5, 5], [7, 5.8], [6.2, 6.3]]) {
+  for (const [x, z] of [[-5.4, 5.4], [7, 5.8], [6.2, 6.3]]) {
     box(0.9, 0.2, 0.5, x, 0, z, M.dark); box(0.6, 0.02, 0.3, x, 0.2, z, mat('#C9D3E0'));
   }
   const can = cyl(0.12, 0.35, 8, 0.17, 4.5, mat('#E3262B'), 8);
 
-  scene.add(new THREE.AmbientLight('#7a6f9a', 1.8));
-  scene.add(new THREE.HemisphereLight('#C9D3E0', '#1A1424', 0.9));
+  // ----- ЛАУНЖ С КАЛЬЯНАМИ (передний левый угол): F у кальяна — затяжка -----
+  const velvet = mat('#5a1f6e'), velvetDark = mat('#3e1450');
+  const rug = new THREE.Mesh(new THREE.PlaneGeometry(5.6, 4.6), new THREE.MeshLambertMaterial({ map: rugTex() }));
+  rug.rotation.x = -Math.PI / 2; rug.position.set(-9, 0.015, 5.6); scene.add(rug);
+  box(1.1, 0.45, 4.4, -11.4, 0, 5.2, velvet, true);                                 // диван вдоль левой стены
+  box(0.4, 1.05, 4.4, -11.8, 0, 5.2, velvetDark);
+  box(3.8, 0.45, 1.1, -8.6, 0, 7.4, velvet, true);                                  // диван вдоль передней
+  box(3.8, 1.05, 0.4, -8.6, 0, 7.8, velvetDark);
+  box(1.1, 0.45, 1.1, -11.4, 0, 7.4, velvet, true);                                 // угол
+  box(1.1, 1.05, 0.4, -11.4, 0, 7.8, velvetDark);
+  box(1.1, 0.7, 0.25, -11.4, 0, 2.95, velvetDark);                                  // подлокотники
+  box(0.25, 0.7, 1.1, -6.65, 0, 7.4, velvetDark);
+  for (const z of [3.9, 5.2, 6.5]) box(0.25, 0.5, 0.7, -11.45, 0.45, z, mat('#c9a227')).rotation.z = -0.25;   // подушки
+  for (const x of [-9.8, -8.2]) box(0.7, 0.5, 0.25, x, 0.45, 7.45, mat('#2EE6FF')).rotation.x = 0.25;
+  cyl(0.85, 0.08, -9, 0.45, 5.4, M.wood, 10); cyl(0.12, 0.45, -9, 0.22, 5.4, M.iron, 6);   // низкий столик
+  obstacles.push({ x1: -9.8, x2: -8.2, z1: 4.6, z2: 6.2, f: 0 });
+  for (const [x, z] of [[-8.6, 5.9], [-9.4, 5.0]]) cyl(0.07, 0.1, x, 0.54, z, mat('#e8e0cc'), 6);   // чашки
+  for (const [x, z] of [[-7, 4.4], [-9.7, 3.4]]) {                                    // пуфы
+    cyl(0.38, 0.4, x, 0.2, z, mat('#b0472f'), 8);
+    obstacles.push({ x1: x - 0.38, x2: x + 0.38, z1: z - 0.38, z2: z + 0.38, f: 0 });
+  }
+  hookah(-10.1, 4.3, 0, '#2EE6FF', [-10.9, 0.6, 5]);                                // шланг тянется к дивану
+  hookah(-7.4, 6.2, 0, '#FF2E9A', [-8.2, 0.6, 7]);
+  hookah(-9, 5.4, 0.49, '#7CFF5B', [-9.6, 0.55, 4.9], 0.6);                          // маленький на столике
+  const loungeSign = neonSign('КАЛЬЯННАЯ', '#B44CFF', '#e2b0ff', 3.6, 0.9);
+  loungeSign.position.set(-11.92, 3, 5.2); loungeSign.rotation.y = Math.PI / 2; scene.add(loungeSign);
+  cyl(0.02, 1.1, -9, 4.45, 5.4, M.iron, 4);                                          // восточная лампа на цепи
+  const lantern = new THREE.Mesh(new THREE.OctahedronGeometry(0.3, 0), glow('#ffb347'));
+  lantern.position.set(-9, 3.6, 5.4); scene.add(lantern);
+  light('#B44CFF', -10.5, 3.2, 5.5, 28, 10);
+  light('#FF9A3C', -9, 3.2, 5.4, 18, 7);
+
+  ambient = new THREE.AmbientLight('#7a6f9a', 1.8); scene.add(ambient);
+  hemi = new THREE.HemisphereLight('#C9D3E0', '#1A1424', 0.9); scene.add(hemi);
 }
 buildClub();
+
+// ---------------------------------------------------------------------
+//  ВТОРОЙ ЭТАЖ: домик и терраса на краю скалы, внизу пустыня.
+//  Стоит прямо на потолке подвала (Y2). Лестница из подвала — F у ступенек.
+// ---------------------------------------------------------------------
+function planksTex() {
+  const c = document.createElement('canvas'); c.width = c.height = 32;
+  const g = c.getContext('2d'), base = new THREE.Color('#8a5a36');
+  for (let row = 0; row < 4; row++) {
+    const k = 0.85 + Math.random() * 0.3;
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 32; x++) {
+      const n = k + (Math.random() - 0.5) * 0.12;
+      g.fillStyle = `rgb(${base.r * 255 * n},${base.g * 255 * n},${base.b * 255 * n})`; g.fillRect(x, row * 8 + y, 1, 1);
+    }
+    g.fillStyle = '#3a2416'; g.fillRect(0, row * 8 + 7, 32, 1); g.fillRect((row * 11) % 32, row * 8, 1, 7);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function stripesTex(a, b) {
+  const c = document.createElement('canvas'); c.width = 16; c.height = 2;
+  const g = c.getContext('2d');
+  for (let i = 0; i < 8; i++) { g.fillStyle = i % 2 ? a : b; g.fillRect(i * 2, 0, 2, 2); }
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const bulbMat = new THREE.MeshBasicMaterial({ color: '#ffd27a' });   // лампочки гирлянды: ночью ярче
+const terraceLights = [];
+function buildUpstairs() {
+  BUILD_FLOOR = 1;
+  const adobe = new THREE.MeshLambertMaterial({ map: noiseTex('#c4875a', 22, 32, 5) });
+  const rail = mat('#4a2c1a'), beam = mat('#6b4426');
+  const rock = new THREE.MeshLambertMaterial({ map: noiseTex('#a8673f', 30, 32, 8) });
+  rock.map.repeat.set(5, 5);
+
+  // Настил на весь этаж и террасу
+  const deckTex = planksTex(); deckTex.repeat.set(12, 10);
+  const deck = new THREE.Mesh(new THREE.PlaneGeometry(24, 20.5), new THREE.MeshLambertMaterial({ map: deckTex }));
+  deck.rotation.x = -Math.PI / 2; deck.position.set(0, Y2 + 0.01, 2.25); scene.add(deck);
+  box(24.4, 0.35, 4.7, 0, Y2 - 0.34, 10.3, beam);                                    // край террасы
+
+  // Скала, на которой всё стоит: большой массив + торчащие глыбы
+  box(30, 36, 24, 0, -31, 2, rock);
+  for (let i = 0; i < 34; i++) {
+    const side = i % 3, w = 3 + Math.random() * 5, h = 4 + Math.random() * 9, d = 3 + Math.random() * 4;
+    // центры глыб подальше от стен подвала, чтобы повёрнутая глыба не проткнула стену
+    const x = side === 0 ? -16 + Math.random() * 32 : (side === 1 ? -1 : 1) * (17 + Math.random() * 2);
+    const z = side === 0 ? 14 + Math.random() * 2.5 : -9 + Math.random() * 22;
+    const y = -8 + Math.random() * 7;
+    const b = box(w, Math.min(h, Y2 - 1.2 - y), d, x, y, z, rock);                    // не выше террасы
+    b.rotation.set((Math.random() - 0.5) * 0.4, Math.random() * 3, (Math.random() - 0.5) * 0.4);
+  }
+
+  // Домик: глиняные стены, плоская крыша, широкий проём на террасу
+  box(24, 4.3, 0.4, 0, Y2, -8.2, adobe);
+  for (const x of [-12.2, 12.2]) box(0.4, 4.3, 6.2, x, Y2, -5, adobe);
+  box(24.8, 0.35, 7, 0, Y2 + 4.3, -5, mat('#7a4a2c'));
+  for (const x of [-11.9, -6, 0, 6.5, 11.9]) box(0.6, 4.3, 0.6, x, Y2, -2, adobe, true);
+  // Пергола над ближней частью террасы
+  for (let x = -12; x <= 12; x += 2) box(0.18, 0.22, 7, x, Y2 + 3.85, 1.5, beam);
+  box(24.4, 0.25, 0.25, 0, Y2 + 3.6, 5, beam);
+  for (const x of [-11.9, -6, 0, 6, 11.9]) box(0.3, 3.6, 0.3, x, Y2, 5, beam, true);
+
+  // Проём лестницы в подвал
+  box(2, 0.02, 3.5, 4.2, Y2, -6.25, glow('#07050a'));
+  for (const x of [3.15, 5.25]) box(0.1, 1, 3.5, x, Y2, -6.25, rail);
+  obstacles.push({ x1: 3.1, x2: 5.3, z1: -8, z2: -4.5, f: 1 });
+  const down = neonSign('↓ ПОДВАЛ', '#FF8A2B', '#ffd0a0', 1.8, 0.45);
+  down.position.set(4.2, Y2 + 2.6, -7.97); scene.add(down);
+
+  // Внутри: диван-тахта, гобелен, столик и кальян
+  box(6, 0.45, 1.1, -7, Y2, -7.35, mat('#8a2f3c'), true);
+  box(6, 0.75, 0.3, -7, Y2 + 0.45, -7.85, mat('#c9a227'));
+  const tap = new THREE.Mesh(new THREE.PlaneGeometry(4.5, 2.2), new THREE.MeshLambertMaterial({ map: rugTex('#1f3a5a', '#6b1d2f') }));
+  tap.position.set(-7, Y2 + 2.6, -7.98); scene.add(tap);
+  cyl(0.7, 0.08, -7, Y2 + 0.42, -5.9, M.wood, 10); cyl(0.1, 0.42, -7, Y2 + 0.21, -5.9, M.iron, 6);
+  obstacles.push({ x1: -7.7, x2: -6.3, z1: -6.6, z2: -5.2, f: 1 });
+  hookah(-5.3, -5.4, Y2, '#ffb347', [-6, Y2 + 0.6, -7]);
+  // Справа: стойка с лимонадами и большое растение
+  box(3, 1.1, 0.8, 9.5, Y2, -7.4, M.wood, true);
+  for (let i = 0; i < 6; i++) cyl(0.08, 0.35, 8.4 + i * 0.42, Y2 + 1.3, -7.4, mat(['#ffb347', '#7CFF5B', '#2EE6FF'][i % 3]), 6);
+  cyl(0.4, 0.6, 11.2, Y2 + 0.3, -3.2, mat('#b0472f'), 8); obstacles.push({ x1: 10.8, x2: 11.6, z1: -3.6, z2: -2.8, f: 1 });
+  for (let i = 0; i < 6; i++) {
+    const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.25, 1.6, 4), mat('#3f7a3a'));
+    leaf.position.set(11.2, Y2 + 1.3, -3.2); leaf.rotation.set(0.6, i * 1.05, 0); leaf.translateY(0.4); scene.add(leaf);
+  }
+  light('#ffb36b', -6, Y2 + 3.4, -5, 18, 10);
+  light('#ffb36b', 8, Y2 + 3.4, -5, 14, 9);
+
+  // Перила по краю террасы
+  for (let x = -12; x <= 12.01; x += 1.5) box(0.12, 1, 0.12, x, Y2, 12.4, rail);
+  box(24.2, 0.1, 0.14, 0, Y2 + 1, 12.4, rail); box(24.2, 0.06, 0.1, 0, Y2 + 0.5, 12.4, rail);
+  for (const sx of [-11.95, 11.95]) {
+    for (let z = -2; z <= 12.4; z += 1.5) box(0.12, 1, 0.12, sx, Y2, z, rail);
+    box(0.14, 0.1, 14.4, sx, Y2 + 1, 5.2, rail); box(0.1, 0.06, 14.4, sx, Y2 + 0.5, 5.2, rail);
+  }
+
+  // Шезлонги под зонтом — смотрят на пустыню
+  for (const x of [-8.6, -6.4]) {
+    box(0.8, 0.35, 2, x, Y2, 9.2, mat('#e8e0cc'), true);
+    box(0.7, 0.08, 1.4, x, Y2 + 0.35, 9.5, mat('#2EE6FF'));
+    const back = box(0.7, 0.1, 0.9, x, Y2 + 0.55, 8.15, mat('#2EE6FF')); back.rotation.x = -0.9;
+  }
+  cyl(0.05, 2.7, -7.5, Y2 + 1.35, 7.6, M.chrome, 6); obstacles.push({ x1: -7.65, x2: -7.35, z1: 7.45, z2: 7.75, f: 1 });
+  const umb = new THREE.Mesh(new THREE.ConeGeometry(1.9, 0.7, 8, 1, true),
+    new THREE.MeshLambertMaterial({ map: stripesTex('#e8334a', '#f4ead2'), side: THREE.DoubleSide }));
+  umb.position.set(-7.5, Y2 + 2.75, 7.6); scene.add(umb);
+  // Кресла-мешки и кальян у перил
+  for (const [x, z, c] of [[5.4, 8.6, '#FF2E9A'], [7.9, 9.6, '#7CFF5B']]) {
+    const bag = new THREE.Mesh(new THREE.IcosahedronGeometry(0.6, 1), mat(c));
+    bag.scale.set(1, 0.6, 1); bag.position.set(x, Y2 + 0.32, z); scene.add(bag);
+    obstacles.push({ x1: x - 0.55, x2: x + 0.55, z1: z - 0.55, z2: z + 0.55, f: 1 });
+  }
+  cyl(0.5, 0.06, 6.7, Y2 + 0.38, 7.6, M.wood, 8); cyl(0.08, 0.38, 6.7, Y2 + 0.19, 7.6, M.iron, 6);
+  obstacles.push({ x1: 6.2, x2: 7.2, z1: 7.1, z2: 8.1, f: 1 });
+  hookah(6.7, 10.9, Y2, '#2EE6FF', [5.7, Y2 + 0.5, 9]);
+  // Телескоп — на антилоп посмотреть
+  for (let i = 0; i < 3; i++) {
+    const leg = cyl(0.03, 1.3, 0, Y2 + 0.6, 11.4, M.iron, 4);
+    leg.rotation.set(0.25 * Math.cos(i * 2.1), 0, 0.25 * Math.sin(i * 2.1)); leg.position.x = 0.15 * Math.sin(i * 2.1);
+  }
+  const scope = cyl(0.09, 1.1, 0, Y2 + 1.35, 11.6, mat('#c9a227'), 8, 0, 1.25);
+  obstacles.push({ x1: -0.4, x2: 0.4, z1: 11, z2: 12, f: 1 });
+  // Кактусы в горшках по углам
+  for (const [x, z] of [[-11, -1], [11, 11.6], [-11, 11.6]]) {
+    cyl(0.35, 0.5, x, Y2 + 0.25, z, mat('#b0472f'), 8);
+    cyl(0.14, 1.2, x, Y2 + 1.1, z, mat('#3f6b3a'), 6);
+    cyl(0.09, 0.5, x + 0.22, Y2 + 1.15, z, mat('#3f6b3a'), 6, 0.9);
+    obstacles.push({ x1: x - 0.4, x2: x + 0.4, z1: z - 0.4, z2: z + 0.4, f: 1 });
+  }
+
+  // Гирлянды на высоких столбах: ночью загораются
+  const top = Y2 + 2.8, posts = { a: [-11.95, -2], b: [11.95, -2], c: [-11.95, 5], d: [11.95, 5], e: [-11.95, 12.4], f: [11.95, 12.4], g: [0, 12.4] };
+  for (const [x, z] of Object.values(posts)) box(0.12, 2.8, 0.12, x, Y2, z, rail);
+  const wire = new THREE.LineBasicMaterial({ color: '#2a2018' });
+  for (const [p, q, sag] of [['a', 'c', 0.5], ['c', 'e', 0.5], ['b', 'd', 0.5], ['d', 'f', 0.5], ['e', 'g', 0.8], ['g', 'f', 0.8], ['c', 'd', 1.3]]) {
+    const A = new THREE.Vector3(posts[p][0], top, posts[p][1]), B = new THREE.Vector3(posts[q][0], top, posts[q][1]);
+    const n = Math.round(A.distanceTo(B) / 0.8), pts = [];
+    for (let i = 0; i <= n; i++) {
+      const k = i / n, P = A.clone().lerp(B, k); P.y -= sag * 4 * k * (1 - k); pts.push(P);
+      if (i > 0 && i < n) { const b = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.09), bulbMat); b.position.copy(P).y -= 0.08; scene.add(b); }
+    }
+    scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), wire));
+  }
+  terraceLights.push(light('#ffc070', -6, Y2 + 2.4, 8.5, 0, 12), light('#ffc070', 6, Y2 + 2.4, 8.5, 0, 12));
+  BUILD_FLOOR = 0;
+}
+buildUpstairs();
+
+// ---------------------------------------------------------------------
+//  ПУСТЫНЯ: дюны, столовые горы, кактусы, небо со сменой суток,
+//  перекати-поле и стадо антилоп
+// ---------------------------------------------------------------------
+const GROUND_Y = -6;
+function groundH(x, z) {
+  const d = Math.hypot(x, z - 2), k = Math.min(1, Math.max(0, (d - 22) / 50));   // у скалы ровно
+  return GROUND_Y + k * (Math.sin(x * 0.031) * 2.4 + Math.sin(z * 0.047 + x * 0.013) * 1.8 + Math.sin((x + z) * 0.12) * 0.45);
+}
+const rnd = (a, b) => a + Math.random() * (b - a);
+{
+  const geo = new THREE.PlaneGeometry(1400, 1400, 90, 90); geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position, cols = [];
+  const sandA = new THREE.Color('#d9a066'), sandB = new THREE.Color('#b9804c'), tmp = new THREE.Color();
+  for (let i = 0; i < pos.count; i++) {
+    const y = groundH(pos.getX(i), pos.getZ(i)); pos.setY(i, y);
+    tmp.copy(sandB).lerp(sandA, Math.min(1, Math.max(0, (y - GROUND_Y + 2.5) / 5 + (Math.random() - 0.5) * 0.25)));
+    cols.push(tmp.r, tmp.g, tmp.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3)); geo.computeVertexNormals();
+  scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
+  // Столовые горы на горизонте
+  for (let i = 0; i < 9; i++) {
+    const a = rnd(-1.3, 1.3) + (i % 3 === 0 ? Math.PI : 0), d = rnd(260, 520), r = rnd(30, 75), h = rnd(25, 70);
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.8, r, h, 7), mat(['#a5553a', '#b8673f', '#8f4a33'][i % 3]));
+    m.position.set(Math.sin(a) * d, GROUND_Y + h / 2 - 2, 2 + Math.cos(a) * d); m.rotation.y = rnd(0, 3); scene.add(m);
+  }
+  // Кактусы-сагуаро и камни
+  const cactus = mat('#3f6b3a'), stone = mat('#8f6a4c');
+  for (let i = 0; i < 60; i++) {
+    const x = rnd(-220, 220), z = rnd(22, 260); if (Math.abs(x) < 20 && z < 30) continue;
+    const y = groundH(x, z), h = rnd(2.5, 5.5);
+    cyl(0.35, h, x, y + h / 2, z, cactus, 6);
+    if (Math.random() < 0.8) { cyl(0.22, 1.2, x + 0.55, y + h * 0.55, z, cactus, 5, 1.3); cyl(0.22, 1.4, x + 0.95, y + h * 0.55 + 0.7, z, cactus, 5); }
+    if (Math.random() < 0.5) { cyl(0.2, 1, x - 0.5, y + h * 0.45, z, cactus, 5, -1.3); cyl(0.2, 1.1, x - 0.85, y + h * 0.45 + 0.55, z, cactus, 5); }
+  }
+  for (let i = 0; i < 50; i++) {
+    const x = rnd(-250, 250), z = rnd(18, 280), s = rnd(0.5, 2.2);
+    const m = new THREE.Mesh(new THREE.DodecahedronGeometry(s, 0), stone);
+    m.position.set(x, groundH(x, z) + s * 0.3, z); m.rotation.set(rnd(0, 3), rnd(0, 3), 0); scene.add(m);
+  }
+}
+
+// Небо: купол с градиентом (горизонт → зенит) + свечение вокруг солнца, звёзды, солнце и луна
+const skyGeo = new THREE.SphereGeometry(950, 24, 14);
+skyGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(skyGeo.attributes.position.count * 3), 3));
+const sky = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
+sky.renderOrder = -1; scene.add(sky);
+const sunMesh = new THREE.Mesh(new THREE.SphereGeometry(32, 10, 8), new THREE.MeshBasicMaterial({ color: '#fff2c0', fog: false }));
+const moonMesh = new THREE.Mesh(new THREE.SphereGeometry(18, 10, 8), new THREE.MeshBasicMaterial({ color: '#e8ecff', fog: false }));
+scene.add(sunMesh, moonMesh);
+const stars = (() => {
+  const p = [];
+  for (let i = 0; i < 700; i++) {
+    const v = new THREE.Vector3(rnd(-1, 1), rnd(0.03, 1), rnd(-1, 1)).normalize().multiplyScalar(900); p.push(v.x, v.y, v.z);
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+  const s = new THREE.Points(g, new THREE.PointsMaterial({ color: '#ffffff', size: 2, sizeAttenuation: false, transparent: true, fog: false, depthWrite: false }));
+  scene.add(s); return s;
+})();
+const sunLight = new THREE.DirectionalLight('#fff4dd', 2.5), moonLight = new THREE.DirectionalLight('#8ea0ff', 0.4);
+scene.add(sunLight, moonLight);
+
+// Сутки: один круг за 10 минут, время у всех игроков общее (по часам)
+const DAY_CYCLE = 600;
+const SKY = { nTop: new THREE.Color('#060a24'), nHor: new THREE.Color('#1c1f48'), dTop: new THREE.Color('#3d86d6'), dHor: new THREE.Color('#d6e6ee'),
+  duskTop: new THREE.Color('#3a2f6e'), duskHor: new THREE.Color('#ff8a4a'), glow: new THREE.Color('#ffb060'),
+  ambN: new THREE.Color('#2a3264'), ambD: new THREE.Color('#d8c7aa') };
+const smooth = (a, b, x) => { const k = Math.min(1, Math.max(0, (x - a) / (b - a))); return k * k * (3 - 2 * k); };
+const sunDir = new THREE.Vector3(), skyTop = new THREE.Color(), skyHor = new THREE.Color(), _c = new THREE.Color(), _v = new THREE.Vector3();
+const basementBg = new THREE.Color('#1A1424'), desertBg = new THREE.Color();
+function updateSky() {
+  const a = ((Date.now() / 1000 / DAY_CYCLE) % 1) * Math.PI * 2;
+  sunDir.set(-Math.cos(a), Math.sin(a), 0.55).normalize();      // восходит слева, садится справа — прямо перед террасой
+  const e = sunDir.y, day = smooth(-0.12, 0.3, e), dusk = Math.exp(-((e / 0.2) ** 2));
+  skyTop.copy(SKY.nTop).lerp(SKY.dTop, day).lerp(SKY.duskTop, dusk * 0.6);
+  skyHor.copy(SKY.nHor).lerp(SKY.dHor, day).lerp(SKY.duskHor, dusk * 0.75);
+  const pos = skyGeo.attributes.position, col = skyGeo.attributes.color, glowK = (0.25 + dusk * 0.9) * smooth(-0.25, 0.05, e);
+  for (let i = 0; i < pos.count; i++) {
+    _v.fromBufferAttribute(pos, i).normalize();
+    _c.copy(skyHor).lerp(skyTop, smooth(0, 0.55, _v.y));
+    _c.lerp(SKY.glow, Math.min(1, Math.pow(Math.max(0, _v.dot(sunDir)), 6) * glowK));
+    col.setXYZ(i, _c.r, _c.g, _c.b);
+  }
+  col.needsUpdate = true;
+  desertBg.copy(skyHor); scene.fog.color.copy(skyHor);
+  sky.position.copy(camera.position); stars.position.copy(camera.position);
+  sunMesh.position.copy(camera.position).addScaledVector(sunDir, 850); sunMesh.visible = e > -0.12;
+  sunMesh.material.color.setRGB(1, 0.7 + 0.25 * day, 0.4 + 0.45 * day);
+  moonMesh.position.copy(camera.position).addScaledVector(sunDir, -850); moonMesh.visible = e < 0.12;
+  sunLight.position.copy(sunDir).multiplyScalar(100); sunLight.intensity = 2.6 * day;
+  sunLight.color.setRGB(1, 0.75 + 0.25 * (1 - dusk), 0.55 + 0.45 * (1 - dusk));
+  moonLight.position.copy(sunDir).multiplyScalar(-100); moonLight.intensity = 0.6 * (1 - day);
+  ambient.color.copy(SKY.ambN).lerp(SKY.ambD, day); ambient.intensity = 0.7 + 0.6 * day;
+  hemi.intensity = 0.3 + 0.6 * day;
+  stars.material.opacity = 1 - day;
+  bulbMat.color.setRGB(1, 0.82, 0.48).multiplyScalar(0.35 + 0.65 * (1 - day));
+  for (const l of terraceLights) l.intensity = 24 * (1 - day);
+}
+// Подвал ↔ терраса: свой свет, туман и фон
+let envUp = null;
+function updateEnv() {
+  const up = current !== null && player.floor === 1;
+  if (up !== envUp) {
+    envUp = up;
+    lightsByFloor[0].forEach(l => l.visible = !up); lightsByFloor[1].forEach(l => l.visible = up);
+    sunLight.visible = moonLight.visible = up;
+    if (up) { scene.background = desertBg; scene.fog.near = 70; scene.fog.far = 650; }
+    else {
+      scene.background = basementBg; scene.fog.color.set('#1A1424'); scene.fog.near = 14; scene.fog.far = 30;
+      ambient.color.set('#7a6f9a'); ambient.intensity = 1.8; hemi.intensity = 0.9;
+    }
+  }
+  if (up) updateSky();
+}
+
+// Перекати-поле: катится по ветру слева направо, подпрыгивает на кочках
+const tumbles = [];
+function resetTumble(w, first) {
+  w.x = first ? rnd(-150, 150) : rnd(-210, -170); w.z = rnd(28, 110); w.speed = rnd(5, 11); w.ph = rnd(0, 6);
+}
+for (let i = 0; i < 9; i++) {
+  const r = rnd(0.8, 1.4), g = new THREE.Group();
+  g.add(new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), new THREE.MeshLambertMaterial({ color: '#9a7444', wireframe: true })));
+  g.add(new THREE.Mesh(new THREE.IcosahedronGeometry(r * 0.75, 0), new THREE.MeshLambertMaterial({ color: '#6e5230', wireframe: true })));
+  scene.add(g);
+  const w = { g, r }; resetTumble(w, true); tumbles.push(w);
+}
+// Антилопы: два стада бегут через пустыню, потом пропадают и появляются снова
+function makeAntelope() {
+  const g = new THREE.Group(), tan = mat('#c08a4e'), white = mat('#efe3cf'), dark = mat('#2e2219');
+  const part = (w, h, d, x, y, z, m, parent = g) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); parent.add(o); return o; };
+  part(1.3, 0.5, 0.45, 0, 1.05, 0, tan);                         // тело
+  part(1.1, 0.14, 0.4, 0, 0.8, 0, white);                        // белое брюхо
+  part(0.18, 0.6, 0.2, 0.62, 1.4, 0, tan).rotation.z = -0.55;    // шея
+  part(0.42, 0.2, 0.18, 0.92, 1.68, 0, tan);                     // голова
+  for (const z of [-0.05, 0.05]) part(0.05, 0.45, 0.05, 0.78, 1.95, z, dark).rotation.z = 0.5;   // рога
+  part(0.12, 0.25, 0.08, -0.68, 1.15, 0, dark).rotation.z = 0.6; // хвост
+  const legs = [];
+  for (const [x, z] of [[0.5, 0.15], [0.5, -0.15], [-0.5, 0.15], [-0.5, -0.15]]) {
+    const pivot = new THREE.Group(); pivot.position.set(x, 0.88, z); g.add(pivot);
+    part(0.09, 0.88, 0.09, 0, -0.44, 0, tan, pivot); legs.push(pivot);
+  }
+  g.scale.setScalar(1.5); scene.add(g);
+  return { g, legs, dx: 0, dz: 0, ph: rnd(0, 6) };
+}
+const herds = [];
+function spawnHerd(h) {
+  h.dir = Math.random() < 0.5 ? 1 : -1; h.z = rnd(35, 130); h.x = -h.dir * rnd(190, 240); h.speed = rnd(11, 15); h.wait = 0;
+  for (const a of h.list) { a.dx = rnd(-7, 7); a.dz = rnd(-5, 5); a.g.visible = true; }
+}
+for (let i = 0; i < 2; i++) {
+  const h = { list: Array.from({ length: 4 + i * 3 }, makeAntelope) };
+  spawnHerd(h); h.x = rnd(-120, 120); herds.push(h);
+}
+function updateDesert(dt, t) {
+  const gust = 1 + Math.sin(t * 0.3) * 0.4;
+  for (const w of tumbles) {
+    w.x += w.speed * gust * dt;
+    const hop = Math.abs(Math.sin(t * w.speed * 0.35 + w.ph)) * 1.1 * w.r;
+    w.g.position.set(w.x, groundH(w.x, w.z) + w.r + hop, w.z);
+    w.g.rotation.z -= w.speed * gust / w.r * dt; w.g.rotation.x += dt * 0.7;
+    if (w.x > 200) resetTumble(w, false);
+  }
+  for (const h of herds) {
+    if (h.wait > 0) { h.wait -= dt; if (h.wait <= 0) spawnHerd(h); continue; }
+    h.x += h.dir * h.speed * dt;
+    for (const a of h.list) {
+      const x = h.x + a.dx + Math.sin(t * 0.8 + a.ph) * 0.6, z = h.z + a.dz, s = t * h.speed * 0.75 + a.ph;
+      a.g.position.set(x, groundH(x, z) + Math.abs(Math.sin(s)) * 0.5, z);
+      a.g.rotation.y = h.dir > 0 ? 0 : Math.PI;
+      a.g.rotation.z = Math.sin(s) * 0.08;
+      a.legs[0].rotation.z = a.legs[1].rotation.z = Math.sin(s) * 0.9;        // скачет: передние и задние вразнобой
+      a.legs[2].rotation.z = a.legs[3].rotation.z = -Math.sin(s) * 0.9;
+    }
+    if (Math.abs(h.x) > 260) { h.wait = rnd(6, 20); for (const a of h.list) a.g.visible = false; }
+  }
+}
+// Кальяны: угли мерцают, из чаши тянется дымок
+let hookahSmokeT = 0;
+function updateHookahs(dt, t) {
+  for (const h of hookahs) h.coal.color.setRGB(1, 0.3 + 0.12 * Math.sin(t * 7 + h.x * 3), 0.08);
+  hookahSmokeT -= dt;
+  if (hookahSmokeT > 0) return;
+  hookahSmokeT = 0.4;
+  const here = hookahs.filter(h => h.f === (current === null ? 0 : player.floor));
+  const h = here[Math.floor(Math.random() * here.length)];
+  if (h) spawnPuff(h.top.x, h.top.y, h.top.z, 0.06, { x: (Math.random() - 0.5) * 0.1, y: 0.25, z: (Math.random() - 0.5) * 0.1 }, 2.2, 1.4);
+}
 
 // ---------------------------------------------------------------------
 //  МИНИИГРА «ХРЮК-РАННЕР» на ЭЛТ-мониторе (как браузерный динозавр, но свинья)
@@ -849,13 +1289,16 @@ makeCharacter = c => MODELS[c.id] ? makeModelCharacter(c) : _makeBoxCharacter(c)
 
 const players = CHARACTERS.map(makeCharacter);
 let current = null;                                   // индекс выбранного или null
-const player = { x: 0, z: 2, angle: 0, walk: 0, moving: false, jumpY: 0, vy: 0 };
+const player = { x: 0, z: 2, angle: 0, walk: 0, moving: false, jumpY: 0, vy: 0, floor: 0 };
 
-// Столкновения: круг игрока выталкивается из прямоугольников
+// Столкновения: круг игрока выталкивается из прямоугольников своего этажа
+const FLOOR_BOUNDS = [{ x: ROOM.x, z1: -ROOM.z, z2: ROOM.z }, { x: ROOM.x, z1: -ROOM.z, z2: 12.4 }];   // наверху — до перил террасы
 function collide(p, r = 0.4) {
-  p.x = Math.max(-ROOM.x + r, Math.min(ROOM.x - r, p.x));
-  p.z = Math.max(-ROOM.z + r, Math.min(ROOM.z - r, p.z));
+  const B = FLOOR_BOUNDS[p.floor || 0];
+  p.x = Math.max(-B.x + r, Math.min(B.x - r, p.x));
+  p.z = Math.max(B.z1 + r, Math.min(B.z2 - r, p.z));
   for (const o of obstacles) {
+    if ((o.f || 0) !== (p.floor || 0)) continue;
     const cx = Math.max(o.x1, Math.min(o.x2, p.x)), cz = Math.max(o.z1, Math.min(o.z2, p.z));
     const dx = p.x - cx, dz = p.z - cz, d = Math.hypot(dx, dz);
     if (d < r) {
@@ -887,9 +1330,10 @@ function startGame(i) {
   current = i; SFX.select();
   players.forEach(p => scene.remove(p.root));
   scene.add(players[i].root);
-  Object.assign(player, { x: 0, z: 2, angle: 0, walk: 0, jumpY: 0, vy: 0 });
+  Object.assign(player, { x: 0, z: 2, angle: 0, walk: 0, jumpY: 0, vy: 0, floor: 0 });
+  camYaw = 0; camDist = CAM_DIST;
   camLook.set(0, 1.6, 0.5);
-  camPos.set(0, 3.9, 9);
+  camPos.set(0, 3.9, 7.4);
   selectEl.classList.add('hidden');
 }
 function backToSelect() {
@@ -897,6 +1341,7 @@ function backToSelect() {
   players.forEach(p => scene.remove(p.root));
   selectEl.classList.remove('hidden');
   exitPC();
+  player.floor = 0; hookahPuff = false;
   promptEl.classList.add('hidden'); drinkTime = 0; buzzTime = 0; soap = 0;
   renderer.domElement.style.filter = '';
 }
@@ -943,9 +1388,37 @@ addEventListener('keydown', e => {
   else if (e.code === 'Space' && !e.repeat && player.jumpY === 0 && drinkTime <= 0) { player.vy = JUMP_POWER; SFX.jump(); }
   else if (e.code === 'KeyF' && nearPC && drinkTime <= 0 && player.jumpY === 0) { enterPC(nearPC); SFX.click(); }
   else if (e.code === 'KeyF' && nearSlot && drinkTime <= 0 && player.jumpY === 0) { enterSlot(nearSlot); SFX.coin(); }
+  else if (e.code === 'KeyF' && nearStairs && !fading && drinkTime <= 0 && player.jumpY === 0) goFloor(player.floor ? 0 : 1);
+  else if (e.code === 'KeyF' && nearHookah && useTime <= 0 && drinkTime <= 0) { useTime = USE_DURATION; hookahPuff = true; SFX.inhale(); }
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Камера ходит за персом: Q/E или правая кнопка мыши — повернуть, колесо — ближе/дальше
+const CAM_DIST = 5.6;
+let camYaw = 0, camDist = CAM_DIST, camDrag = false, lastMouseX = 0, snapCam = false;
+const camFree = () => current !== null && !pcMode && !slotMode;
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('mousedown', e => { if (e.button === 2 && camFree()) { camDrag = true; lastMouseX = e.clientX; } });
+addEventListener('mouseup', e => { if (e.button === 2) camDrag = false; });
+addEventListener('mousemove', e => {
+  if (camDrag && camFree()) camYaw -= (e.clientX - lastMouseX) * 0.008;
+  lastMouseX = e.clientX;
+});
+addEventListener('wheel', e => { if (camFree()) camDist = Math.max(3, Math.min(9, camDist + Math.sign(e.deltaY) * 0.6)); }, { passive: true });
+
+// Лестница: F у ступенек → затемнение → другой этаж
+let nearStairs = false, nearHookah = null, hookahPuff = false, fading = false;
+const fadeEl = document.getElementById('fade');
+function goFloor(f) {
+  fading = true; fadeEl.style.opacity = 1; SFX.step();
+  setTimeout(() => {
+    Object.assign(player, { floor: f, x: 4.2, z: -3.5, angle: 0, vy: 0, jumpY: 0 });
+    camYaw = f ? Math.PI : 0;            // наверху камера сразу смотрит на террасу и пустыню
+    snapCam = true;
+    fadeEl.style.opacity = 0; fading = false;
+  }, 380);
+}
 
 // ---------------------------------------------------------------------
 //  Игровой цикл
@@ -979,18 +1452,22 @@ const heroLight = new THREE.PointLight('#ffd9b8', 6, 4, 1); scene.add(heroLight)
 function update(dt, t) {
   if (current === null) {
     // Экран выбора: камера медленно плывёт по клубу
-    camera.position.set(Math.sin(t * 0.15) * 6, 3.8, 9);
+    camera.position.set(Math.sin(t * 0.15) * 6, 3.8, 7.2);
     camera.lookAt(0, 2, -4);
     osdMode.textContent = 'PLAY ▶'; hint.textContent = 'ОКТ. 20 2006';
     return;
   }
   const c = CHARACTERS[current], p = players[current];
-  let dx = 0, dz = 0;
-  if (keys.ArrowLeft  || keys.KeyA) dx -= 1;
-  if (keys.ArrowRight || keys.KeyD) dx += 1;
-  if (keys.ArrowUp    || keys.KeyW) dz -= 1;
-  if (keys.ArrowDown  || keys.KeyS) dz += 1;
-  if (drinkTime > 0 || pcMode || slotMode) { dx = 0; dz = 0; }             // пока пьёт — стоит на месте
+  let ix = 0, iz = 0;
+  if (keys.ArrowLeft  || keys.KeyA) ix -= 1;
+  if (keys.ArrowRight || keys.KeyD) ix += 1;
+  if (keys.ArrowUp    || keys.KeyW) iz -= 1;
+  if (keys.ArrowDown  || keys.KeyS) iz += 1;
+  if (camFree()) camYaw += ((keys.KeyQ ? 1 : 0) - (keys.KeyE ? 1 : 0)) * dt * 2.2;
+  // «вперёд» — туда, куда смотрит камера
+  const cY = Math.cos(camYaw), sY = Math.sin(camYaw);
+  let dx = ix * cY + iz * sY, dz = -ix * sY + iz * cY;
+  if (drinkTime > 0 || pcMode || slotMode || fading) { dx = 0; dz = 0; }   // пока пьёт — стоит на месте
   const len = Math.hypot(dx, dz);
   player.moving = len > 0;
   if (player.moving) {
@@ -1011,7 +1488,7 @@ function update(dt, t) {
   const bob = player.moving ? Math.abs(Math.sin(w)) * 0.12 : 0;
   const breath = player.moving ? 1 : 1 + Math.sin(t * 2.5) * 0.015;
   const base = c.size * 0.85;
-  p.root.position.set(player.x, 0, player.z);
+  p.root.position.set(player.x, floorY(player.floor), player.z);
   // Прыжок: летит вверх, гравитация тянет вниз
   if (player.vy !== 0 || player.jumpY > 0) {
     player.vy -= GRAVITY * dt;
@@ -1033,13 +1510,18 @@ function update(dt, t) {
   }
 
   // Стойка бара: подошёл близко — подсветка «F», нажал — пьёт пиво
-  nearBar = player.x > -4.2 && player.x < 3.2 && player.z < -3.6;
-  nearPC = player.x > 7 ? pcs.find(pc => Math.abs(player.z - pc.z) < 1.3) || null : null;
-  nearSlot = player.z < -5.2 && player.x > 5.5 && player.x < 9.2
+  const down = player.floor === 0;                              // бар, компы и автоматы — только в подвале
+  nearBar = down && player.x > -4.2 && player.x < 3.2 && player.z < -3.6;
+  nearPC = down && player.x > 7 ? pcs.find(pc => Math.abs(player.z - pc.z) < 1.3) || null : null;
+  nearSlot = down && player.z < -5.2 && player.x > 5.5 && player.x < 9.2
     ? slots.reduce((a, b) => Math.abs(player.x - a.x) < Math.abs(player.x - b.x) ? a : b) : null;
   if (nearSlot && player.x < 8.9) nearPC = null;                // у автоматов — автоматы, а не комп
-  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ' : 'ВЫПИТЬ ПИВА';
-  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot) && drinkTime <= 0 && !pcMode && !slotMode));
+  nearStairs = player.x > 3.25 && player.x < 5.15 && player.z < -3.75;   // у лестницы (внизу и наверху в одном месте)
+  nearHookah = hookahs.find(h => h.f === player.floor && Math.hypot(h.x - player.x, h.z - player.z) < 1.7) || null;
+  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ'
+    : nearStairs ? (down ? 'НАВЕРХ, НА ТЕРРАСУ' : 'ВНИЗ, В ПОДВАЛ') : nearHookah ? 'ПОКУРИТЬ КАЛЬЯН' : 'ВЫПИТЬ ПИВА';
+  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot || nearStairs || nearHookah)
+    && drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode && !fading));
   p.mug.visible = drinkTime > 0;
   if (drinkTime > 0) {
     drinkTime -= dt;
@@ -1062,10 +1544,14 @@ function update(dt, t) {
     p.arms[0].rotation.x = -2.4 * lift;
     p.arms[0].rotation.z = 0.6 * lift;                          // к лицу, а не в сторону
     if (drinkTime <= 0) p.head.rotation.x = (c.id === 'danya' ? -0.3 : 0.1) * lift;
-    hint.textContent = USE_TEXT[c.id];
+    hint.textContent = hookahPuff ? '* БУЛЬК-БУЛЬК-БУЛЬК... *' : USE_TEXT[c.id];
     if (c.id === 'yarik') {                                       // Ярик: секунду тянет кальян, голова чуть назад
       p.head.rotation.x = -0.15 * Math.min(1, k * 3);
       if (useTime <= 0) { hugeCloud(p.head); SFX.exhale(); p.head.rotation.x = 0; }
+    }
+    if (hookahPuff && useTime <= 0) {                             // затяжка из кальяна в лаунже — облако у любого
+      if (c.id !== 'yarik') { hugeCloud(p.head); SFX.exhale(); }
+      hookahPuff = false;
     }
     if (c.id === 'edik' && useTime <= 0) {                        // выдох — большое облако пара
       for (let i = 0; i < 6; i++) {
@@ -1085,7 +1571,7 @@ function update(dt, t) {
     ? `blur(${2.5 * soap}px) saturate(${1 + 0.8 * soap}) hue-rotate(${Math.sin(t * 1.7) * 30 * soap}deg)`
     : '';
 
-  heroLight.position.set(player.x, 2.6, player.z + 1.2);
+  heroLight.position.set(player.x, floorY(player.floor) + 2.6, player.z + 1.2);
 
   // Садится за комп: подходит к стулу, ноги сгибаются, руки на клавиатуру
   if (pcMode) {
@@ -1127,8 +1613,17 @@ function update(dt, t) {
     hint.textContent = APP_HINT[os.app];
   } else {
     if (pcMode) hint.textContent = '* садится за комп *';
-    camPos.lerp(new THREE.Vector3(player.x * 0.85, 3.4, Math.min(player.z + 5.5, ROOM.z + 2)), ease);
-    camLook.lerp(new THREE.Vector3(player.x, 1.6, player.z - 1.5), ease);
+    // Камера сзади-сверху на расстоянии camDist, повёрнута на camYaw; не вылезает за стены
+    const by = floorY(player.floor);
+    let cx = player.x + sY * camDist, cz = player.z + cY * camDist, cy = by + 1.4 + camDist * 0.36;
+    if (player.floor === 0) { cx = Math.max(-11.5, Math.min(11.5, cx)); cz = Math.max(-7.5, Math.min(7.5, cz)); }
+    else {
+      cz = Math.max(-7.6, cz);
+      if (cz < -1.8) { cx = Math.max(-11.6, Math.min(11.6, cx)); cy = Math.min(cy, by + 3.9); }   // в домике — под крышей
+    }
+    const camT = new THREE.Vector3(cx, cy, cz), lookT = new THREE.Vector3(player.x - sY * 1.5, by + 1.6, player.z - cY * 1.5);
+    if (snapCam) { camPos.copy(camT); camLook.copy(lookT); snapCam = false; }
+    else { camPos.lerp(camT, ease); camLook.lerp(lookT, ease); }
   }
   camera.position.copy(camPos);
   camera.lookAt(camLook);
@@ -1138,7 +1633,7 @@ function update(dt, t) {
   }
 
   osdMode.textContent = 'PLAY ▶ ' + c.name;
-  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · J — эмоция · ESC — назад';
+  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · Q/E, ПКМ — камера · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · J — эмоция · ESC — назад';
 }
 
 // ---------------------------------------------------------------------
@@ -1200,9 +1695,10 @@ function netTick(t, dt) {
     c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle),
     vx: moving ? r2(velX) : 0, vz: moving ? r2(velZ) : 0, jt: jumpAt,
     e: emoteT > 0 ? emote : -1, m: moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
+    f: player.floor, h: hookahPuff ? 1 : 0,
   };
   const p = netSent;
-  let need = !p || t - netSentAt > NET_BEAT || ['c', 'e', 'm', 'd', 'u', 'b', 'sit', 'jt'].some(k => p[k] !== s[k]);
+  let need = !p || t - netSentAt > NET_BEAT || ['c', 'e', 'm', 'd', 'u', 'b', 'sit', 'jt', 'f', 'h'].some(k => p[k] !== s[k]);
   if (!need && s.c != null) {
     const age = t - netSentAt, px = p.x + p.vx * age, pz = p.z + p.vz * age;   // где перс у друга сейчас
     need = Math.hypot(px - s.x, pz - s.z) > 1 || Math.hypot(p.vx - s.vx, p.vz - s.vz) > 1.5 || (!s.m && Math.abs(p.a - s.a) > 0.6);
@@ -1223,6 +1719,7 @@ function updateRemotes(dt) {
     const s = r.s, m = r.model, k = Math.min(1, dt * 8);
     const age = Math.min(3, (now - r.seen) / 1000);  // доезжает по скорости, но не дальше 3 с
     const tx = s.x + (s.vx || 0) * age, tz = s.z + (s.vz || 0) * age;
+    if (r.f !== (s.f || 0)) { r.f = s.f || 0; r.x = tx; r.z = tz; }   // сменил этаж — сразу на месте, без проезда
     r.x += (tx - r.x) * k; r.z += (tz - r.z) * k;
     const da = s.a - r.angle; r.angle += Math.atan2(Math.sin(da), Math.cos(da)) * k;
     r.walk = s.m ? r.walk + dt : 0;
@@ -1230,15 +1727,15 @@ function updateRemotes(dt) {
     const jt = (now - (r.jtLocal || 0)) / 1000;      // прыжок по формуле, без лишних записей
     if (s.jt && s.jt !== r.jtSeen) { r.jtSeen = s.jt; r.jtLocal = now; }
     const jumpY = jt < JUMP_T ? JUMP_POWER * jt - GRAVITY * jt * jt / 2 : 0;
-    m.root.position.set(r.x, 0, r.z);
+    m.root.position.set(r.x, floorY(r.f), r.z);
     m.rig.position.y = bob + Math.max(0, jumpY) + (s.sit ? 0.06 : 0);
     m.rig.rotation.y = r.angle;
     m.legs[0].rotation.x = s.sit ? -1.5 : swing; m.legs[1].rotation.x = s.sit ? -1.5 : -swing;
     m.arms[0].rotation.x = s.u ? -2.4 : s.sit ? -1.1 : -swing * 0.8;
     m.arms[1].rotation.x = s.d ? -2.5 : s.sit ? -1.1 : swing * 0.8;
     m.mug.visible = !!s.d;
-    if (r.wasU && !s.u && CHARACTERS[r.cid].id === 'yarik') hugeCloud(m.head);   // выдохнул у друга
-    r.wasU = s.u;
+    if (r.wasU && !s.u && (CHARACTERS[r.cid].id === 'yarik' || r.wasH)) hugeCloud(m.head);   // выдохнул у друга
+    r.wasU = s.u; r.wasH = s.h;
     m.setMood(s.e >= 0 ? FACE_NAMES[s.e] : s.b ? 'happy' : 'calm');
   }
 }
@@ -1301,6 +1798,7 @@ function soundTick(dt) {
 function loop() {
   const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
   update(dt, t); updatePuffs(dt); updateRemotes(dt); netTick(t, dt); soundTick(dt);
+  updateEnv(); updateDesert(dt, t); updateHookahs(dt, t);
   // статус сети прямо в OSD: видно, подключился ли ты и сколько людей на странице
   osdMode.textContent += !db ? ' · ОФЛАЙН' : ` · ОНЛАЙН: ${remotes.size + 1}` + (netErr ? ` · НЕ ОТПРАВЛЯЕТСЯ: ${netErr}` : '');
   renderer.render(scene, camera);
