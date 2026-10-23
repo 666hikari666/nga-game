@@ -17,9 +17,11 @@
   - Слот-машины: `slots[]`, `slotScreenTex`, `enterSlot`/`leaveSlot`; подход + F → камера наезжает → `openSlots()`.
   - Онлайн: коллекция `online/<NET_ID>` в Firebase (`netTick`, `syncPeers`, `updateRemotes`). Пишем только при изменении
     (позиция + скорость, действия, эмоция, прыжок как метка времени), не чаще 0.15 с, «я тут» раз в 10 с; у других перс доезжает по скорости.
-  - Даня — 3D-модель `assets/models/danya.glb` (сборка: `assets/models/build.py` из исходного .glb: раскраска по зонам,
-    упрощение, распил на части с перекрытием у суставов, лицо — маска с UV). Эмоции: `assets/chars/danya/face3d_*.png`
-    (12 шт., `FACE_NAMES`), кнопка J — эмоция на 3 с (синхронится как `s.e`). Фон текстур = цвет кожи модели #e8ac7e.
+  - Персы — 3D-модели `assets/models/<id>.glb`. Сборка из сырого .glb: `python assets/models/build.py <id> <src.glb> assets/models/<id>`
+    (зоны/цвета/суставы каждого — в `CONFIG` в build.py; раскраска, упрощение, распил на части с перекрытием, лицо — маска с UV).
+    Исходники: `E:\Downloads\{stylized character 3d model,ярик моделька,эдик}.glb`. Референсы и листы эмоций: `C:\Users\rogoz\downloads`.
+    Эмоции: `assets/chars/<id>/face3d_*.png` (12 шт., `FACE_NAMES`), J — эмоция на 3 с (синхр. как `s.e`). Фон листов = цвет кожи модели.
+    У Ярика/Эдика одна рука в модели держит шланг/вейп — она в торсе и не качается. Просмотр: `model-view.html?m=<id>`.
   - Звуки: WebAudio-синтез (`SFX`, `soundTick`), включаются после первого нажатия.
 - `slots/slots.js` — мини-игра «NGA Design Game» в shadow DOM. Собрана из `D:\Design game\nga-design-game.html`
   (стили, разметка и скрипт внутри строк). Общие данные в db: `tries` (история, работы), `state/live` (пульт: крутка, таймер, игроки),
