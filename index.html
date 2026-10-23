@@ -35,6 +35,15 @@
                  animation: pulse .8s ease-in-out infinite alternate; }
   @keyframes pulse { from { box-shadow: 0 0 6px #FF8A2B; transform: scale(1); } to { box-shadow: 0 0 26px #FF8A2B; transform: scale(1.12); } }
 
+  /* ===== Просмотр арта в полном качестве ===== */
+  #artView { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center;
+             justify-content: center; gap: .5em; background: rgba(8,6,12,.92); }
+  #artView img { max-width: 92%; max-height: 86%; object-fit: contain; box-shadow: 0 0 40px rgba(180,76,255,.45);
+                 image-rendering: auto; animation: artIn .25s ease-out; }
+  @keyframes artIn { from { opacity: 0; transform: scale(.94); } to { opacity: 1; transform: scale(1); } }
+  #artView .av-cap { font-size: clamp(14px, 2vw, 24px); color: #C9D3E0; text-shadow: 2px 0 #FF2E9A, -2px 0 #2EE6FF; }
+  #artView .av-help { font-size: clamp(11px, 1.4vw, 16px); opacity: .6; }
+
   /* ===== Меню забивки кальяна ===== */
   #hookahMenu { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; min-width: 46%;
                 padding: 1.4vw 2vw; background: rgba(26,20,36,.88); border: 3px solid #B44CFF; box-shadow: 0 0 24px #B44CFF;
@@ -77,6 +86,11 @@
     <div class="cards" id="cards"></div>
   </div>
   <div id="prompt" class="hidden"><span class="key">F</span><span id="promptText">ВЫПИТЬ ПИВА</span></div>
+  <div id="artView" class="hidden">
+    <img id="artImg" alt="">
+    <div class="av-cap" id="artCap"></div>
+    <div class="av-help">← → — листать · ESC / F — закрыть</div>
+  </div>
   <div id="hookahMenu" class="hidden">
     <div class="hm-title">ЗАБИВКА</div>
     <div class="hm-row" id="hmStrength"></div>
@@ -175,6 +189,21 @@ const standY = (f, x, z) => inStairs(x, z) ? Y2 * (STAIR.zLow - z) / (STAIR.zLow
 let BUILD_FLOOR = 0;                     // какой этаж сейчас строим: свет и препятствия запоминают этаж
 const lightsByFloor = [[], []];          // свет одного этажа выключается, пока мы на другом
 const hookahs = [];                      // кальяны: { x, z, f, top, coal }
+// Наши арты (assets/posters/<file>.jpg): на стене — в VHS-стиле, по F — в полном качестве
+const ARTS = [
+  { file: 'fallen-city',  title: 'FALLEN CITY',      w: 1368, h: 2000 },
+  { file: 'angels-world', title: 'ANGELS WORLD',     w: 1368, h: 2000 },
+  { file: 'darkness',     title: 'DARKNESS',         w: 1368, h: 2000 },
+  { file: 'light-dark',   title: 'LIGHT / DARK',     w: 1368, h: 2000 },
+  { file: 'cold-winter',  title: 'COLD WINTER',      w: 1368, h: 2000 },
+  { file: 'ivanovo',      title: 'ИВАНОВО',          w: 1080, h: 1440 },
+  { file: 'greed',        title: 'GREED',            w: 1080, h: 1433 },
+  { file: 'samurai',      title: 'ДЕНЬ, КОГДА ВСЁ РЕШИЛОСЬ', w: 1224, h: 1536 },
+  { file: 'vampire',      title: 'VAMPIRE',          w: 1224, h: 1644 },
+  { file: 'trash',        title: 'YOU ARE TRASH',    w: 1156, h: 2000 },
+  { file: '4-kolesa',     title: '4 КОЛЕСА',         w: 1080, h: 1350 },
+];
+const artSpots = [];                     // где висят: { i, x, z, f, nx, nz }
 let ambient, hemi;                       // общий свет — днём/ночью на террасе меняется
 
 // Пиксельная «грязная» текстура из шума
@@ -348,6 +377,58 @@ function rugTex(bg = '#6b1d2f', mid = '#2a1640') {
   g.fillStyle = '#2EE6FF'; for (const [x, y] of [[7, 7], [24, 7], [7, 24], [24, 24]]) g.fillRect(x, y, 2, 2);
   const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
   return t;
+}
+// Арт на стене в стиле нашей кассеты: мало пикселей, сдвиг цветов, строки развёртки, шум, виньетка
+function vhsArtTex(file, aspect) {
+  const W = 160, H = Math.round(W / aspect);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.fillStyle = '#111'; g.fillRect(0, 0, W, H);
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
+  const img = new Image();
+  img.onload = () => {
+    const sw = 80, sh = Math.round(sw / aspect);                  // «кассетное» разрешение
+    const small = document.createElement('canvas'); small.width = sw; small.height = sh;
+    const sg = small.getContext('2d'); sg.filter = 'contrast(1.15) saturate(0.85) sepia(0.12)'; sg.drawImage(img, 0, 0, sw, sh);
+    const tint = col => {                                         // копия только в одном цвете — для сдвига каналов
+      const k = document.createElement('canvas'); k.width = sw; k.height = sh;
+      const kg = k.getContext('2d'); kg.drawImage(small, 0, 0); kg.globalCompositeOperation = 'multiply';
+      kg.fillStyle = col; kg.fillRect(0, 0, sw, sh); return k;
+    };
+    g.imageSmoothingEnabled = false;
+    g.drawImage(small, 0, 0, W, H);
+    g.globalCompositeOperation = 'lighter';
+    g.globalAlpha = 0.22; g.drawImage(tint('#ff0040'), 2, 0, W, H);
+    g.globalAlpha = 0.18; g.drawImage(tint('#00e5ff'), -2, 0, W, H);
+    g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1;
+    g.fillStyle = 'rgba(0,0,0,.28)'; for (let y = 0; y < H; y += 2) g.fillRect(0, y, W, 1);          // строки развёртки
+    for (let i = 0; i < W * H * 0.015; i++) {                                                      // шум
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,.18)' : 'rgba(0,0,0,.25)';
+      g.fillRect(Math.random() * W | 0, Math.random() * H | 0, 1, 1);
+    }
+    const by = H * (0.2 + Math.random() * 0.6) | 0;                                                 // полоса трекинга
+    g.drawImage(c, 0, by, W, 4, 3, by, W, 4); g.fillStyle = 'rgba(255,255,255,.1)'; g.fillRect(0, by, W, 4);
+    const v = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+    v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,.55)'); g.fillStyle = v; g.fillRect(0, 0, W, H);
+    t.needsUpdate = true;
+  };
+  img.src = `assets/posters/${file}.jpg`;
+  return t;
+}
+// Повесить арт i на стену: (x, y, z) — центр, ry — поворот (лицом туда, куда смотрит плоскость), H — высота в метрах
+function hangArt(i, x, y, z, ry, H = 1.5) {
+  const a = ARTS[i], asp = a.w / a.h, W = H * asp, map = vhsArtTex(a.file, asp);
+  const nx = Math.sin(ry), nz = Math.cos(ry);
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(W + 0.12, H + 0.12, 0.04), M.dark);
+  frame.position.set(x + nx * 0.02, y, z + nz * 0.02); frame.rotation.y = ry; scene.add(frame);
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(W, H),
+    new THREE.MeshLambertMaterial({ map, emissive: '#ffffff', emissiveMap: map, emissiveIntensity: 0.45 }));
+  m.position.set(x + nx * 0.045, y, z + nz * 0.045); m.rotation.y = ry; scene.add(m);
+  for (const sx of [-1, 1]) {                                     // скотч по верхним углам
+    const tape = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.07), new THREE.MeshLambertMaterial({ color: '#d8cfa8', transparent: true, opacity: 0.85 }));
+    tape.position.set(x + nx * 0.05 + Math.cos(ry) * sx * W / 2, y + H / 2 - 0.02, z + nz * 0.05 - Math.sin(ry) * sx * W / 2);
+    tape.rotation.set(0, ry, sx * 0.6); scene.add(tape);
+  }
+  artSpots.push({ i, x, z, f: BUILD_FLOOR, nx, nz });
 }
 // Кальян: колба, шахта, блюдце, чаша с углями и шланг до мундштука (end — точка в мире)
 function hookah(x, z, y0, color, end, s = 1) {
@@ -564,22 +645,15 @@ function buildClub() {
   light('#B44CFF', -10.5, 3.2, 5.5, 28, 10);
   light('#FF9A3C', -9, 3.2, 5.4, 18, 7);
 
-  // ----- Мелочи: постеры, огнетушитель, лужи -----
-  const poster = (lines, bg, fg, accent, w, h, x, y, z, ry) => {
-    const t = canvasTex(64, (g, s) => {
-      noiseRect(g, 0, 0, s, s, bg, 14);
-      g.fillStyle = accent; g.fillRect(3, 3, s - 6, 2); g.fillRect(3, s - 5, s - 6, 2);
-      g.fillStyle = fg; g.textAlign = 'center';
-      lines.forEach(([txt, size, yy]) => { g.font = `bold ${size}px Impact, sans-serif`; g.fillText(txt, 32, yy); });
-      g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(0, 0, s, 1); g.fillRect(50, 0, 1, s);   // сгиб и потёртость
-    });
-    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshLambertMaterial({ map: t }));
-    m.position.set(x, y, z); m.rotation.y = ry; scene.add(m);
-  };
-  poster([['NGA', 22, 26], ['CUP', 16, 42], ['2006', 10, 56]], '#2a1640', '#ff7cc4', '#2EE6FF', 1.1, 1.1, -11.95, 2.4, 0.4, Math.PI / 2);
-  poster([['ХРЮК', 16, 22], ['РАННЕР', 13, 38], ['ИГРАЙ!', 9, 54]], '#0a160c', '#7CFF5B', '#FF9BB5', 1, 1, 9.2, 3.1, -7.96, 0);
-  poster([['КАЛЬЯН', 14, 24], ['24/7', 18, 46]], '#3a1020', '#ffb347', '#B44CFF', 1, 1, -5.6, 2.5, 7.96, Math.PI);
-  poster([['НЕ', 14, 22], ['КУРИТЬ', 12, 38], ['(шутка)', 8, 54]], '#d8d4c8', '#c0102a', '#c0102a', 0.7, 0.7, -2.2, 2.2, 7.96, Math.PI);
+  // ----- Наши арты на стенах (F рядом — посмотреть в полном качестве), огнетушитель, лужи -----
+  hangArt(0, -11.97, 2.4, 1.2, Math.PI / 2, 1.9);    // FALLEN CITY — левая стена у качалки
+  hangArt(3, -8, 2.7, -7.97, 0, 1.9);                // LIGHT / DARK — дальняя стена за штангой
+  hangArt(9, 9.1, 2.9, -7.97, 0, 1.8);               // YOU ARE TRASH — над ПК-клубом
+  hangArt(1, 11.97, 2.7, 6.4, -Math.PI / 2, 1.9);    // ANGELS WORLD — правая стена над коробками
+  hangArt(8, -5.6, 2.5, 7.97, Math.PI, 1.8);         // VAMPIRE — передняя стена у лаунжа
+  hangArt(2, -2, 2.5, 7.97, Math.PI, 1.9);           // DARKNESS
+  hangArt(10, 1.8, 2.5, 7.97, Math.PI, 1.7);         // 4 КОЛЕСА
+  hangArt(5, 5.4, 2.5, 7.97, Math.PI, 1.8);          // ИВАНОВО
   cyl(0.15, 0.6, 2.4, 0.3, -0.8, mat('#c0102a'), 8); cyl(0.05, 0.15, 2.4, 0.67, -0.8, M.dark, 6);   // огнетушитель
   const puddle = new THREE.MeshPhongMaterial({ color: '#15121c', shininess: 40, specular: '#3a3550', transparent: true, opacity: 0.75 });
   for (const [x, z, sx, sz] of [[-2.5, 0.5, 1.6, 0.9], [6.5, 2.5, 1.1, 0.7], [-4.8, -1.5, 0.9, 0.6]]) {
@@ -655,6 +729,9 @@ function buildUpstairs() {
   box(6, 0.75, 0.3, -7, Y2 + 0.45, -7.85, mat('#c9a227'));
   const tap = new THREE.Mesh(new THREE.PlaneGeometry(4.5, 2.2), new THREE.MeshLambertMaterial({ map: rugTex('#1f3a5a', '#6b1d2f') }));
   tap.position.set(-7, Y2 + 2.6, -7.98); scene.add(tap);
+  hangArt(4, 0.5, Y2 + 2.4, -7.97, 0, 1.9);              // COLD WINTER
+  hangArt(6, 9.5, Y2 + 2.7, -7.97, 0, 1.8);              // GREED — над стойкой
+  hangArt(7, -11.97, Y2 + 2.3, -4.6, Math.PI / 2, 2);  // самурай — боковая стена домика
   cyl(0.7, 0.08, -7, Y2 + 0.42, -5.9, M.wood, 10); cyl(0.1, 0.42, -7, Y2 + 0.21, -5.9, M.iron, 6);
   obstacles.push({ x1: -7.7, x2: -6.3, z1: -6.6, z2: -5.2, f: 1 });
   hookah(-5.3, -5.4, Y2, '#ffb347', [-6, Y2 + 0.6, -7]);
@@ -1556,7 +1633,7 @@ function backToSelect() {
   players.forEach(p => scene.remove(p.root));
   selectEl.classList.remove('hidden');
   exitPC();
-  player.floor = 0; smoke = null; closeHookahMenu();
+  player.floor = 0; smoke = null; closeHookahMenu(); closeArt();
   promptEl.classList.add('hidden'); drinkTime = 0; buzzTime = 0; soap = 0;
   renderer.domElement.style.filter = '';
 }
@@ -1568,7 +1645,7 @@ const USE_LABEL = { edik: 'затяжка', danya: 'глоток', yarik: 'ка�
 const USE_TEXT  = { edik: '* ПФФФ... *', danya: '* ПШ-Ш-Ш, ГЛЫК *', yarik: '* ВДЫ-Ы-Ы-ЫХ... *' };
 let useTime = 0;
 addEventListener('mousedown', e => {
-  if (e.button === 0 && current !== null && !pcMode && !slotMode && !hmOpen && useTime <= 0 && drinkTime <= 0) {
+  if (e.button === 0 && current !== null && !pcMode && !slotMode && !hmOpen && !artOpen && useTime <= 0 && drinkTime <= 0) {
     useTime = USE_DURATION;
     ({ edik: SFX.puff, danya: SFX.can, yarik: SFX.inhale })[CHARACTERS[current].id]();
   }
@@ -1583,6 +1660,14 @@ const promptEl = document.getElementById('prompt');
 const promptTextEl = document.getElementById('promptText');
 addEventListener('keydown', e => {
   if (slotMode) return;                                          // в слотах клавиши у мини-игры
+  if (artOpen) {                                                 // смотрим арт: стрелки — листать, ESC/F — закрыть
+    e.preventDefault();
+    if (e.repeat) return;
+    if (e.code === 'ArrowLeft' || e.code === 'KeyA') { showArt(artIdx - 1); SFX.click(); }
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') { showArt(artIdx + 1); SFX.click(); }
+    else if (e.code === 'Escape' || e.code === 'KeyF') closeArt();
+    return;
+  }
   if (hmOpen) {                                                  // меню забивки: цифра — вкус, стрелки — крепость
     e.preventDefault();
     if (e.repeat) return;                                        // зажатая F не закрывает меню сразу
@@ -1614,6 +1699,7 @@ addEventListener('keydown', e => {
   else if (e.code === 'KeyF' && nearPC && drinkTime <= 0 && player.jumpY === 0) { enterPC(nearPC); SFX.click(); }
   else if (e.code === 'KeyF' && nearSlot && drinkTime <= 0 && player.jumpY === 0) { enterSlot(nearSlot); SFX.coin(); }
   else if (e.code === 'KeyF' && nearHookah && useTime <= 0 && drinkTime <= 0 && !e.repeat) openHookahMenu();
+  else if (e.code === 'KeyF' && nearArt && !e.repeat) openArt(nearArt.i);
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
@@ -1668,6 +1754,18 @@ hmEl.addEventListener('click', e => {
   if (st) { hmStrength = +st.dataset.st; renderHookahMenu(); SFX.click(); }
   else if (fl) chooseFlavor(+fl.dataset.fl);
 });
+// Арты: подошёл к арту на стене → F → открывается картинка в полном качестве, ← → — листать
+let nearArt = null, artOpen = false, artIdx = 0;
+const artEl = document.getElementById('artView'), artImg = document.getElementById('artImg'), artCap = document.getElementById('artCap');
+function showArt(i) {
+  artIdx = (i + ARTS.length) % ARTS.length;
+  artImg.src = `assets/posters/${ARTS[artIdx].file}.jpg`;
+  artImg.style.animation = 'none'; void artImg.offsetWidth; artImg.style.animation = '';   // анимация появления заново
+  artCap.textContent = `${ARTS[artIdx].title} · NG ARTWORKS · ${artIdx + 1}/${ARTS.length}`;
+}
+function openArt(i) { artOpen = true; showArt(i); artEl.classList.remove('hidden'); for (const k in keys) keys[k] = false; SFX.click(); }
+function closeArt() { artOpen = false; artEl.classList.add('hidden'); }
+artEl.addEventListener('click', closeArt);
 // Выдох: цветное облако; у забивки NGA — логотип из дыма
 function exhaleSmoke(head, fl, st) {
   const F = FLAVORS[fl] || FLAVORS[0], k = (STRENGTHS[st] || STRENGTHS[1]).k;
@@ -1719,7 +1817,7 @@ function update(dt, t) {
   if (keys.ArrowDown  || keys.KeyS) iz += 1;
   // «вперёд» — туда, куда смотрит камера
   let dx = ix * Math.cos(camYaw) + iz * Math.sin(camYaw), dz = -ix * Math.sin(camYaw) + iz * Math.cos(camYaw);
-  if (drinkTime > 0 || pcMode || slotMode || hmOpen) { dx = 0; dz = 0; }   // пока пьёт или выбирает забивку — стоит
+  if (drinkTime > 0 || pcMode || slotMode || hmOpen || artOpen) { dx = 0; dz = 0; }   // пока пьёт или выбирает забивку — стоит
   const len = Math.hypot(dx, dz);
   player.moving = len > 0;
   if (player.moving) {
@@ -1776,9 +1874,13 @@ function update(dt, t) {
     ? slots.reduce((a, b) => Math.abs(player.x - a.x) < Math.abs(player.x - b.x) ? a : b) : null;
   if (nearSlot && player.x < 8.9) nearPC = null;                // у автоматов — автоматы, а не комп
   nearHookah = hookahs.find(h => h.f === player.floor && Math.hypot(h.x - player.x, h.z - player.z) < 1.7) || null;
-  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ' : nearHookah ? 'ЗАБИТЬ КАЛЬЯН' : 'ВЫПИТЬ ПИВА';
-  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot || nearHookah)
-    && drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode && !hmOpen));
+  // арт рядом: ближе 2.2 м, на своём этаже и стоишь перед ним, а не за стеной
+  nearArt = artSpots.find(s => s.f === player.floor && Math.hypot(s.x - player.x, s.z - player.z) < 2.2
+    && (player.x - s.x) * s.nx + (player.z - s.z) * s.nz > 0.2) || null;
+  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ' : nearHookah ? 'ЗАБИТЬ КАЛЬЯН'
+    : nearArt ? 'СМОТРЕТЬ АРТ' : 'ВЫПИТЬ ПИВА';
+  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot || nearHookah || nearArt)
+    && drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode && !hmOpen && !artOpen));
   p.mug.visible = drinkTime > 0;
   if (drinkTime > 0) {
     drinkTime -= dt;
