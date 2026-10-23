@@ -10,7 +10,9 @@
 ## Устройство
 - `index.html` — вся игра. Разделы помечены комментариями `// ----`.
   - Слот-машины: `slots[]`, `slotScreenTex`, `enterSlot`/`leaveSlot`; подход + F → камера наезжает → `openSlots()`.
-  - Онлайн: позиции игроков пишутся в db-коллекцию `online/<NET_ID>` ~4 раза/с (`netTick`, `syncPeers`, `updateRemotes`).
+  - Онлайн: db-коллекция `online/<NET_ID>` (`netTick`, `syncPeers`, `updateRemotes`). Пишем только при изменении
+    (позиция + скорость, действия, прыжок как метка времени), не чаще 0.6 с, «я тут» раз в 20 с; у других перс доезжает по скорости.
+    Причина: у гостей claude.ai лимит записей (`invalid_argument ... exceeds a limit`) — частые записи его съедают.
     Room не используется для движения: гостей вне организации claude.ai туда не пускает.
   - Звуки: WebAudio-синтез (`SFX`, `soundTick`), включаются после первого нажатия.
 - `slots/slots.js` — мини-игра «NGA Design Game» в shadow DOM. Собрана из `D:\Design game\nga-design-game.html`
