@@ -1,0 +1,1187 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NGA: Подвал</title>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #1A1424; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: 'VT323', monospace; color: #C9D3E0; }
+  #wrap { position: relative; width: min(100vw, 177.78vh); aspect-ratio: 16 / 9; }
+  canvas { width: 100% !important; height: 100% !important; display: block; image-rendering: pixelated; }
+
+  /* ===== Экран выбора ===== */
+  #select { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; background: rgba(26,20,36,.7); gap: 2vw; }
+  #select h1 { margin: 0; font-weight: normal; font-size: clamp(28px, 6vw, 72px); letter-spacing: 4px; }
+  #select p  { margin: 0; font-size: clamp(14px, 2vw, 24px); opacity: .7; }
+  .cards { display: flex; gap: 2vw; }
+  .card { width: clamp(110px, 20vw, 240px); padding: 1.5vw; border: 3px solid transparent; cursor: pointer;
+          text-align: center; background: rgba(26,20,36,.6); transition: transform .15s; }
+  .card.active { border-color: var(--c); transform: translateY(-8px); }
+  .card .face { width: 60%; aspect-ratio: 1; margin: 0 auto 1vw; border-radius: 50%; background: #E8B48F;
+                border: 5px solid var(--c); box-shadow: 0 0 20px var(--c); }
+  .card .name { color: var(--c); font-size: clamp(22px, 4vw, 48px); }
+  .card .role { font-size: clamp(12px, 1.6vw, 20px); }
+  .hidden { display: none !important; }
+
+  /* ===== Подсказка «нажми F» у стойки ===== */
+  #prompt { position: absolute; left: 50%; bottom: 16%; transform: translateX(-50%); display: flex; align-items: center;
+            gap: .6em; font-size: clamp(18px, 3vw, 34px); color: #FF8A2B; text-shadow: 0 0 10px #FF8A2B;
+            pointer-events: none; z-index: 2; }
+  #prompt .key { display: inline-block; min-width: 1.4em; padding: 0 .3em; text-align: center; color: #1A1424;
+                 background: #FF8A2B; border: 3px solid #C9D3E0; box-shadow: 0 0 18px #FF8A2B;
+                 animation: pulse .8s ease-in-out infinite alternate; }
+  @keyframes pulse { from { box-shadow: 0 0 6px #FF8A2B; transform: scale(1); } to { box-shadow: 0 0 26px #FF8A2B; transform: scale(1.12); } }
+
+  /* ===== VHS-оверлей (чистый CSS) ===== */
+  .vhs { position: absolute; inset: 0; pointer-events: none; }
+  .scanlines { background: repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.28) 2px 4px); }
+  .vignette  { background: radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,.75) 100%); }
+  .tracking  { background: linear-gradient(to bottom, transparent, rgba(201,211,224,.08), transparent);
+               height: 12%; animation: track 6s linear infinite; }
+  @keyframes track { from { top: -15%; } to { top: 110%; } }
+  .osd { font-size: clamp(16px, 3vw, 34px); text-shadow: 2px 0 #FF2E9A, -2px 0 #2EE6FF; }
+  .osd .tl { position: absolute; top: 4%; left: 4%; }
+  .osd .tr { position: absolute; top: 4%; right: 4%; }
+  .osd .br { position: absolute; bottom: 4%; right: 4%; }
+  .osd .bl { position: absolute; bottom: 4%; left: 4%; font-size: .7em; opacity: .8; }
+  .rec { color: #E3262B; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+<script type="importmap">
+  { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="wrap">
+  <div id="select">
+    <h1>ВСТАВЬТЕ КАССЕТУ</h1>
+    <p>выбери бойца: 1 / 2 / 3, клик или ← → + ENTER</p>
+    <div class="cards" id="cards"></div>
+  </div>
+  <div id="prompt" class="hidden"><span class="key">F</span><span id="promptText">ВЫПИТЬ ПИВА</span></div>
+  <div class="vhs tracking"></div>
+  <div class="vhs scanlines"></div>
+  <div class="vhs vignette"></div>
+  <div class="vhs osd">
+    <div class="tl" id="osdMode">PLAY ▶</div>
+    <div class="tr"><span class="rec">●</span> REC</div>
+    <div class="br" id="timecode">00:00:00</div>
+    <div class="bl" id="hint"></div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { openSlots, slotsOpen } from './slots/slots.js';
+
+// =====================================================================
+//  1. КАРТИНКИ ЛИЦ. Лицо натягивается на переднюю грань кубической головы.
+//     calm — обычное лицо, happy — после пива. В папке каждого перса лежат
+//     все 12 эмоций (face_smug.png, face_dead_inside.png ...) — можно менять.
+//     head — картинка для экрана выбора. Нет файла — голова цвета кожи.
+// =====================================================================
+const ASSETS = {
+  danya: { head: 'assets/chars/danya/head_neutral.png',
+           calm: 'assets/chars/danya/face_neutral.png', happy: 'assets/chars/danya/face_laughing.png' },
+  yarik: { head: 'assets/chars/yarik/head_neutral.png',
+           calm: 'assets/chars/yarik/face_neutral.png', happy: 'assets/chars/yarik/face_laughing.png' },
+  edik:  { head: 'assets/chars/edik/head_neutral.png',
+           calm: 'assets/chars/edik/face_neutral.png',  happy: 'assets/chars/edik/face_laughing.png' },
+};
+
+// =====================================================================
+//  2. ПЕРСОНАЖИ: цвета одежды, причёска, предметы в руках.
+//     size — общий масштаб, wide — насколько широкий торс.
+// =====================================================================
+const CHARACTERS = [
+  { id: 'danya', name: 'ДАНЯ', role: 'тимлид, хаос',       color: '#7CFF5B', speed: 6, skin: '#e9ac7f',
+    size: 1.0, wide: 1.0, hair: 'shaggy', hairColor: '#5e3420', shirt: '#1d1a24', pants: '#18161e',
+    shoes: '#8f8672', phones: null, hoodie: true, earrings: true, right: 'can', left: null },
+  { id: 'yarik', name: 'ЯРИК', role: 'спокойный работяга', color: '#2EE6FF', speed: 4, skin: '#e8ab7f',
+    size: 0.93, wide: 1.15, hair: 'short', hairColor: '#5e3420', shirt: '#1d1a24', pants: '#18161e',
+    shoes: '#1a181e', phones: 'head', hoodie: false, earrings: false, right: 'shawarma', left: null },
+  { id: 'edik',  name: 'ЭДИК', role: 'серьёзный геймер',   color: '#FF2E9A', speed: 5, skin: '#ebac7d',
+    size: 1.03, wide: 0.92, hair: 'long', hairColor: '#5b3a26', shirt: '#1d1a24', pants: '#2b2f45',
+    shoes: '#1a181e', phones: 'neck', hoodie: false, earrings: false, right: 'vape', left: 'cola' },
+];
+const SKIN = '#E8B48F';
+
+// Открыли двойным кликом (file://) — браузер не даст 3D подгрузить лица. Подсказываем.
+if (location.protocol === 'file:') {
+  const warn = document.createElement('div');
+  warn.textContent = 'ЛИЦА НЕ ЗАГРУЗЯТСЯ: открой через VS Code → правый клик по index.html → Open with Live Server';
+  warn.style.cssText = 'position:absolute;top:12%;left:50%;transform:translateX(-50%);z-index:5;padding:6px 12px;' +
+    'background:#E3262B;color:#fff;font-size:clamp(14px,2vw,22px);text-align:center;';
+  document.getElementById('wrap').appendChild(warn);
+}
+
+const PIXELS = 480;   // ширина картинки в пикселях: меньше = больше «PS1-мыла»
+
+// ---------------------------------------------------------------------
+//  Сцена, камера, рендер
+// ---------------------------------------------------------------------
+const wrap = document.getElementById('wrap');
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1);
+renderer.setSize(PIXELS, PIXELS * 9 / 16, false);
+wrap.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#1A1424');
+scene.fog = new THREE.Fog('#1A1424', 14, 30);
+const camera = new THREE.PerspectiveCamera(55, 16 / 9, 0.1, 100);
+
+// Комната: X от -12 до 12, Z от -8 (дальняя стена, бар) до 8, высота 5
+const ROOM = { x: 12, z: 8, h: 5 };
+const obstacles = [];   // прямоугольники, через которые нельзя пройти
+
+// Пиксельная «грязная» текстура из шума
+function noiseTex(base, spread = 18, size = 32, stains = 0) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d'); const col = new THREE.Color(base);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const n = (Math.random() - 0.5) * spread / 255;
+    g.fillStyle = `rgb(${(col.r + n) * 255},${(col.g + n) * 255},${(col.b + n) * 255})`;
+    g.fillRect(x, y, 1, 1);
+  }
+  g.fillStyle = 'rgba(26,20,36,.35)';
+  for (let i = 0; i < stains; i++) {
+    g.beginPath(); g.arc(Math.random() * size, Math.random() * size, 1 + Math.random() * 4, 0, 7); g.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter; t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...opts });
+const glow = color => new THREE.MeshBasicMaterial({ color });
+const M = {
+  concrete: new THREE.MeshLambertMaterial({ map: noiseTex('#5a5670', 30, 32, 6) }),
+  wood:     new THREE.MeshLambertMaterial({ map: noiseTex('#6b3f24', 30) }),
+  rust:     mat('#6e4a34'),
+  iron:     mat('#3a3640'),
+  chrome:   mat('#C9D3E0'),
+  beige:    mat('#cfc6a8'),
+  dark:     mat('#24202c'),
+  box:      new THREE.MeshLambertMaterial({ map: noiseTex('#8a6a45', 30) }),
+};
+
+// Помощник: коробка. collide = нельзя пройти насквозь
+function box(w, h, d, x, y, z, material, collide = false) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  m.position.set(x, y + h / 2, z); scene.add(m);
+  if (collide) obstacles.push({ x1: x - w / 2, x2: x + w / 2, z1: z - d / 2, z2: z + d / 2 });
+  return m;
+}
+function cyl(r, h, x, y, z, material, seg = 8, rotZ = 0, rotX = 0) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, seg), material);
+  m.position.set(x, y, z); m.rotation.z = rotZ; m.rotation.x = rotX; scene.add(m);
+  return m;
+}
+function light(color, x, y, z, power = 25, dist = 14) {
+  const l = new THREE.PointLight(color, power, dist, 1.2); l.position.set(x, y, z); scene.add(l);
+}
+
+// ---------------------------------------------------------------------
+//  ПОСТРОЙКА КЛУБА (см. studio_master: качалка / бар / ПК-клуб)
+// ---------------------------------------------------------------------
+const pcs = [];   // компы ПК-клуба: { z, screen }
+const slots = []; // слот-машины: { x, z, screen }
+// Экран слот-машины: три барабана со звёздочками
+function slotScreenTex(i) {
+  const c = document.createElement('canvas'); c.width = 96; c.height = 64;
+  const g = c.getContext('2d');
+  g.fillStyle = '#0b0508'; g.fillRect(0, 0, 96, 64);
+  for (let k = 0; k < 3; k++) {
+    g.fillStyle = ['#f4ead2', '#e8f4ff', '#ffe8ee'][(k + i) % 3]; g.fillRect(6 + k * 29, 10, 25, 44);
+    g.fillStyle = '#c0102a'; g.font = 'bold 22px Impact, sans-serif'; g.textAlign = 'center';
+    g.fillText(['★', '7', '?'][(k + i) % 3], 18.5 + k * 29, 40);
+  }
+  g.fillStyle = '#e8334a'; g.fillRect(0, 31, 96, 2);
+  const t = new THREE.CanvasTexture(c); t.magFilter = THREE.NearestFilter; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function buildClub() {
+  // Пол с пятнами, стены, потолок
+  const floorTex = noiseTex('#4a4658', 26, 64, 40); floorTex.repeat.set(4, 3);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.x * 2, ROOM.z * 2),
+    new THREE.MeshLambertMaterial({ map: floorTex }));
+  floor.rotation.x = -Math.PI / 2; scene.add(floor);
+  box(ROOM.x * 2, ROOM.h, 0.5, 0, 0, -ROOM.z - 0.25, M.concrete);                // дальняя стена
+  box(0.5, ROOM.h, ROOM.z * 2, -ROOM.x - 0.25, 0, 0, M.concrete);                // левая
+  box(0.5, ROOM.h, ROOM.z * 2,  ROOM.x + 0.25, 0, 0, M.concrete);                // правая
+  box(ROOM.x * 2, 0.3, ROOM.z * 2, 0, ROOM.h, 0, M.dark);                        // потолок
+  for (let z = -6; z <= 6; z += 4) box(ROOM.x * 2, 0.4, 0.5, 0, ROOM.h - 0.4, z, M.iron); // балки
+  cyl(0.25, ROOM.x * 2, 0, ROOM.h - 0.8, -7, M.iron, 8, Math.PI / 2);            // трубы
+  cyl(0.18, ROOM.z * 2, 3, ROOM.h - 0.6, 0, M.iron, 8, 0, Math.PI / 2);
+
+  // ----- КАЧАЛКА (слева), холодный свет -----
+  box(0.1, 2.5, 5, -ROOM.x + 0.05, 1, -3, mat('#7d86a8', { emissive: '#1a1f33' })); // треснувшее зеркало
+  for (const z of [-6.5, -3.5]) box(0.3, 3.2, 0.3, -10, 0, z, M.rust, true);        // стойки
+  cyl(0.06, 4.2, -10, 2.6, -5, M.chrome, 6, 0, Math.PI / 2);                         // гриф
+  for (const z of [-7.1, -2.9]) cyl(0.75, 0.35, -10, 2.6, z, M.iron, 8, 0, Math.PI / 2); // блины
+  box(1, 0.7, 2.6, -7.5, 0, -4.5, M.dark, true);                                    // скамья
+  // гигантская гантель на полу
+  cyl(0.12, 2.4, -8, 0.6, 2, M.chrome, 6, Math.PI / 2);
+  for (const x of [-9.1, -6.9]) cyl(0.6, 0.6, x, 0.6, 2, M.iron, 8, Math.PI / 2);
+  obstacles.push({ x1: -9.5, x2: -6.5, z1: 1.4, z2: 2.6 });
+  const kettle = new THREE.Mesh(new THREE.IcosahedronGeometry(0.45, 0), M.iron);
+  kettle.position.set(-5.5, 0.45, -6.5); scene.add(kettle);
+  box(4, 0.04, 5, -8, 0, -1, mat('#2a2633'));                                        // маты
+  box(1, 2.2, 0.6, -5.5, 0, -7.4, mat('#5d6470'), true);                             // шкафчик
+  box(1.6, 0.12, 0.5, -8, 4.6, -1, glow('#d8d4ff'));                                 // лампы-трубки
+  box(1.6, 0.12, 0.5, -8, 4.6, -6, glow('#d8d4ff'));
+  light('#9a8cff', -8, 4, -2, 30, 14);
+
+  // ----- БАР (центр), тёплый свет + неон NGA -----
+  box(7, 1.3, 1.2, -0.5, 0, -5.2, M.wood, true);                                    // стойка
+  box(7.2, 0.12, 1.4, -0.5, 1.3, -5.2, mat('#3d2416'));                              // столешница
+  for (const x of [-1.2, -0.4, 0.4]) {                                               // огромные краны
+    cyl(0.12, 1.1, x, 1.95, -5.3, M.chrome, 6);
+    box(0.35, 0.25, 0.3, x, 2.4, -5.3, M.chrome);
+  }
+  for (const x of [-3, -1.5, 0, 1.5]) {                                              // кривые табуреты
+    cyl(0.35, 0.15, x, 1.15, -4, M.wood, 7);
+    cyl(0.04, 1.1, x, 0.55, -4, M.iron, 4);
+  }
+  for (const y of [1.8, 2.6]) {                                                      // полки с бутылками
+    box(5, 0.08, 0.4, -0.5, y, -7.75, M.wood);
+    for (let i = 0; i < 9; i++)
+      cyl(0.09, 0.45, -2.7 + i * 0.55, y + 0.3, -7.75, mat(['#3d6b2a', '#7a3b1a', '#c9d3e0'][i % 3]), 6);
+  }
+  const tv = box(1.3, 1, 1, -3.7, 2.9, -7.2, M.beige);                               // ЭЛТ на кронштейне
+  tv.rotation.y = 0.4;
+  box(1, 0.75, 0.05, -3.55, 3.02, -6.7, glow('#3b3f58')).rotation.y = 0.4;
+  for (const x of [-2.5, 1.5]) {                                                     // лампы над баром
+    const shade = new THREE.Mesh(new THREE.ConeGeometry(0.4, 0.4, 6, 1, true), mat('#2b2a30', { side: 2 }));
+    shade.position.set(x, 3.7, -5.2); scene.add(shade);
+    box(0.2, 0.2, 0.2, x, 3.4, -5.2, glow('#FF8A2B'));
+  }
+  light('#FF8A2B', 0, 3.3, -4.5, 45, 14);
+  cyl(0.45, 1.1, -4.8, 0.55, -6.6, M.chrome, 10); obstacles.push({ x1: -5.3, x2: -4.3, z1: -7.1, z2: -6.1 }); // кег
+  // Неон NGA
+  const nc = document.createElement('canvas'); nc.width = 256; nc.height = 96;
+  const g = nc.getContext('2d');
+  g.font = 'bold 84px Impact, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.shadowColor = '#FF2E9A'; g.shadowBlur = 18; g.fillStyle = '#ff7cc4'; g.fillText('NGA', 128, 50);
+  g.fillText('NGA', 128, 50);
+  const neon = new THREE.Mesh(new THREE.PlaneGeometry(3, 1.1),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(nc), transparent: true }));
+  neon.position.set(-0.5, 3.7, -7.95); scene.add(neon);
+  light('#FF2E9A', -0.5, 3.6, -6.8, 25, 9);
+
+  // ----- ЛЕСТНИЦА наверх (справа от бара) -----
+  for (let i = 0; i < 7; i++) box(2, 0.5 * (i + 1), 0.5, 4.2, 0, -4.75 - i * 0.5, M.concrete);
+  obstacles.push({ x1: 3.2, x2: 5.2, z1: -8, z2: -4.5 });
+  box(0.3, ROOM.h, 4, 3, 0, -6, M.concrete); box(0.3, ROOM.h, 4, 5.4, 0, -6, M.concrete);
+  light('#FF8A2B', 4.2, 4, -7.5, 12, 6);
+
+  // ----- ПК-КЛУБ (справа), зелёное свечение -----
+  box(2, 0.1, 12, 10.6, 1, -1, M.wood); box(2, 1, 0.2, 10.6, 0, -7, M.wood);
+  obstacles.push({ x1: 9.6, x2: 12, z1: -7, z2: 5 });
+  for (let i = 0; i < 3; i++) {
+    const z = -5 + i * 3.5;
+    box(1.1, 0.95, 1.1, 10.9, 1.1, z, M.beige);                                      // ЭЛТ-монитор
+    pcs.push({ z, screen: box(0.05, 0.7, 0.85, 10.33, 1.25, z, glow('#7CFF5B')) });  // экран (на нём миниигра)
+    box(0.5, 0.05, 0.9, 9.9, 1.1, z, M.dark);                                        // крошечная клавиатура
+    // игровое кресло с изолентой
+    box(0.9, 0.2, 0.9, 8.9, 0.6, z, M.dark, true);
+    box(0.2, 1.3, 0.9, 8.45, 0.7, z, M.dark);
+    box(0.22, 0.15, 0.9, 8.45, 1.4, z, mat('#9a9aa0'));
+    cyl(0.05, 0.6, 8.9, 0.3, z, M.chrome, 4);
+  }
+  box(1.6, 0.1, 9, 11.2, 3, -2, M.wood);                                             // полка с системниками
+  for (let i = 0; i < 3; i++) box(0.9, 1, 0.5, 11.2, 3.1, -5 + i * 3.5, M.beige);
+  box(1.6, 0.12, 0.5, 9, 4.6, -3, glow('#7CFF5B'));
+  light('#7CFF5B', 9, 3.5, -1, 35, 13);
+
+  // ----- СЛОТ-МАШИНЫ NGA (между лестницей и ПК-клубом): F — открыть дизайн-слоты -----
+  for (let i = 0; i < 3; i++) {
+    const x = 6.25 + i * 1.15, z = -7.3;
+    box(1, 1.1, 0.9, x, 0, z, mat('#5b0f1e'), true);                               // тумба
+    box(1, 1.25, 0.75, x, 1.1, z - 0.07, mat('#6b1b30'));                          // корпус
+    box(1.05, 0.08, 0.95, x, 1.1, z, mat('#c9a227'));                              // золотая окантовка
+    box(1, 0.45, 0.7, x, 2.35, z - 0.1, glow('#ff3df0'));                          // светящаяся вывеска
+    const screen = box(0.8, 0.55, 0.04, x, 1.45, z + 0.32, new THREE.MeshBasicMaterial({ map: slotScreenTex(i) }));
+    box(0.9, 0.12, 0.35, x, 1.1, z + 0.45, mat('#3a0d1a'));                         // пульт
+    cyl(0.04, 0.7, x + 0.6, 1.85, z + 0.1, M.chrome, 6);                           // рычаг
+    const ball = new THREE.Mesh(new THREE.IcosahedronGeometry(0.11, 0), glow('#e8334a'));
+    ball.position.set(x + 0.6, 2.22, z + 0.1); scene.add(ball);
+    slots.push({ x, z, screen });
+  }
+  light('#ff3df0', 7.4, 2.8, -6.2, 18, 7);
+
+  // ----- Хлам: коробки и VHS по краям -----
+  for (const [x, z, s] of [[-10.5, 6.5, 1.2], [-9.4, 6.9, 0.9], [-10.6, 5.2, 0.8], [10.6, 6.6, 1.2], [9.3, 7, 1], [10.4, 5.4, 0.7]])
+    box(s, s, s, x, 0, z, M.box, true);
+  for (const [x, z] of [[-6.5, 5], [7, 5.8], [6.2, 6.3]]) {
+    box(0.9, 0.2, 0.5, x, 0, z, M.dark); box(0.6, 0.02, 0.3, x, 0.2, z, mat('#C9D3E0'));
+  }
+  const can = cyl(0.12, 0.35, 8, 0.17, 4.5, mat('#E3262B'), 8);
+
+  scene.add(new THREE.AmbientLight('#7a6f9a', 1.8));
+  scene.add(new THREE.HemisphereLight('#C9D3E0', '#1A1424', 0.9));
+}
+buildClub();
+
+// ---------------------------------------------------------------------
+//  МИНИИГРА «ХРЮК-РАННЕР» на ЭЛТ-мониторе (как браузерный динозавр, но свинья)
+//  Рисуется в маленький canvas, который натягивается на экран монитора.
+// ---------------------------------------------------------------------
+const PIG = { w: 320, h: 240, ground: 200, jump: 360, gravity: 1150 };
+const pigCanvas = document.createElement('canvas'); pigCanvas.width = PIG.w; pigCanvas.height = PIG.h;
+const pg = pigCanvas.getContext('2d');
+const pigTex = new THREE.CanvasTexture(pigCanvas);
+pigTex.magFilter = THREE.NearestFilter; pigTex.colorSpace = THREE.SRGBColorSpace;
+const pigScreenMat = new THREE.MeshBasicMaterial({ map: pigTex });
+const pig = { y: 0, vy: 0, obstacles: [], next: 1, speed: 170, score: 0, best: 0, state: 'ready', t: 0 };
+
+function pigReset() {
+  Object.assign(pig, { y: 0, vy: 0, obstacles: [], next: 1, speed: 170, score: 0, state: 'run' });
+}
+function pigJump() {
+  if (pig.state !== 'run') { pigReset(); return; }               // старт / рестарт
+  if (pig.y === 0) pig.vy = PIG.jump;
+}
+function pigUpdate(dt) {
+  pig.t += dt;
+  if (pig.state !== 'run') return;
+  pig.vy -= PIG.gravity * dt;
+  pig.y = Math.max(0, pig.y + pig.vy * dt); if (pig.y === 0) pig.vy = 0;
+  pig.speed += dt * 6; pig.score += dt * 10;
+  pig.next -= dt;
+  if (pig.next <= 0) {                                            // новое препятствие — «правка»
+    const tall = Math.random() < 0.35;
+    pig.obstacles.push({ x: PIG.w + 10, w: 12 + Math.random() * 12, h: tall ? 38 : 22 + Math.random() * 10 });
+    pig.next = 0.8 + Math.random() * 1.1;
+  }
+  for (const o of pig.obstacles) o.x -= pig.speed * dt;
+  pig.obstacles = pig.obstacles.filter(o => o.x + o.w > -5);
+  // столкновение свиньи (x 36..66) с препятствием
+  const top = PIG.ground - pig.y - 22;
+  for (const o of pig.obstacles)
+    if (o.x < 62 && o.x + o.w > 40 && top + 20 > PIG.ground - o.h) {
+      pig.state = 'over'; pig.best = Math.max(pig.best, Math.floor(pig.score));
+    }
+}
+function pigDraw() {
+  const g = pg, G = '#7CFF5B';
+  g.fillStyle = '#0a160c'; g.fillRect(0, 0, PIG.w, PIG.h);
+  g.fillStyle = G; g.fillRect(0, PIG.ground, PIG.w, 2);                         // земля
+  for (let i = 0; i < 12; i++) g.fillRect((i * 37 - pig.t * pig.speed * 0.5) % PIG.w + PIG.w * (i * 37 - pig.t * pig.speed * 0.5 < 0), PIG.ground + 8 + (i % 3) * 6, 4, 2);
+  // препятствия
+  for (const o of pig.obstacles) {
+    g.fillRect(o.x, PIG.ground - o.h, o.w, o.h);
+    g.fillRect(o.x - 4, PIG.ground - o.h * 0.7, 4, 6); g.fillRect(o.x + o.w, PIG.ground - o.h * 0.5, 4, 6);
+  }
+  // свинья
+  const x = 36, y = PIG.ground - pig.y - 22, run = pig.state === 'run' && pig.y === 0 && Math.floor(pig.t * 10) % 2;
+  g.fillStyle = '#FF9BB5'; g.fillRect(x, y, 28, 18);                              // тело
+  g.fillRect(x + 22, y - 6, 12, 12);                                               // голова
+  g.fillStyle = '#ff6f96'; g.fillRect(x + 32, y - 2, 5, 6);                       // пятачок
+  g.fillRect(x + 24, y - 10, 4, 5);                                                // ухо
+  g.fillStyle = '#0a160c'; g.fillRect(x + 29, y - 3, 2, 2);                       // глаз
+  g.fillStyle = '#FF9BB5';
+  g.fillRect(x + 3, y + 18, 4, run ? 2 : 4); g.fillRect(x + 20, y + 18, 4, run ? 4 : 2); // ножки
+  g.fillRect(x - 4, y + 2, 4, 3);                                                  // хвостик
+  // текст
+  g.fillStyle = G; g.font = '20px VT323, monospace'; g.textAlign = 'right';
+  g.fillText(`${String(Math.floor(pig.score)).padStart(5, '0')}  РЕКОРД ${String(pig.best).padStart(5, '0')}`, PIG.w - 10, 22);
+  g.textAlign = 'center';
+  if (pig.state === 'ready') {
+    g.font = '34px VT323, monospace'; g.fillText('ХРЮК-РАННЕР', PIG.w / 2, 90);
+    g.font = '20px VT323, monospace'; g.fillText('ПРОБЕЛ — СТАРТ / ПРЫЖОК', PIG.w / 2, 120);
+  } else if (pig.state === 'over') {
+    g.font = '34px VT323, monospace'; g.fillText('ПОГИБ В РЕЙДЕ', PIG.w / 2, 90);
+    g.font = '20px VT323, monospace'; g.fillText('ПРОБЕЛ — ЕЩЁ РАЗ', PIG.w / 2, 120);
+  }
+}
+
+// ---------------------------------------------------------------------
+//  КОМП: рабочий стол с курсором → выбор игры. Всё рисуется в тот же
+//  canvas на экране монитора. Мышь «попадает» в экран через луч из камеры.
+// ---------------------------------------------------------------------
+const os = { app: 'desktop', mouse: { x: 160, y: 120 }, hover: null };
+const ICONS = [
+  { id: 'pig',   label: 'ХРЮК-РАННЕР', x: 18, y: 16 },
+  { id: 'raid',  label: 'ТАРКОВ',      x: 18, y: 76 },
+  { id: 'trash', label: 'ПРАВКИ_v12',  x: 18, y: 136 },
+];
+function openApp(id) {
+  if (id === 'pig') { os.app = 'pig'; pig.state = 'ready'; }
+  if (id === 'raid') { os.app = 'raid'; raidNew(); }
+  if (id === 'trash') os.toast = 3;                               // «файл повреждён» — шутка
+}
+function drawIcon(g, ic, hot) {
+  const { x, y } = ic;
+  if (hot) { g.fillStyle = 'rgba(46,230,255,.25)'; g.fillRect(x - 6, y - 4, 76, 54); }
+  if (ic.id === 'pig') {                                          // мини-свинья
+    g.fillStyle = '#FF9BB5'; g.fillRect(x + 18, y + 10, 22, 14); g.fillRect(x + 34, y + 5, 10, 10);
+    g.fillStyle = '#ff6f96'; g.fillRect(x + 42, y + 9, 4, 5);
+  } else if (ic.id === 'raid') {                                  // прицел + хаки
+    g.fillStyle = '#5b6b3a'; g.fillRect(x + 16, y + 2, 32, 28);
+    g.strokeStyle = '#d9d3a0'; g.lineWidth = 2; g.beginPath(); g.arc(x + 32, y + 16, 9, 0, 7); g.stroke();
+    g.fillStyle = '#d9d3a0'; g.fillRect(x + 31, y + 4, 2, 24); g.fillRect(x + 20, y + 15, 24, 2);
+  } else {                                                        // папка
+    g.fillStyle = '#FF8A2B'; g.fillRect(x + 16, y + 8, 32, 22); g.fillRect(x + 16, y + 4, 14, 6);
+  }
+  g.fillStyle = '#C9D3E0'; g.font = '14px VT323, monospace'; g.textAlign = 'center';
+  g.fillText(ic.label, x + 32, y + 44);
+}
+function drawDesktop(g) {
+  g.fillStyle = '#1f2a4a'; g.fillRect(0, 0, PIG.w, PIG.h);       // обои
+  g.fillStyle = 'rgba(255,46,154,.18)'; g.font = '64px VT323, monospace'; g.textAlign = 'center';
+  g.fillText('NGA', PIG.w / 2 + 40, 130);
+  os.hover = ICONS.find(ic => os.mouse.x > ic.x - 6 && os.mouse.x < ic.x + 70 && os.mouse.y > ic.y - 4 && os.mouse.y < ic.y + 50) || null;
+  for (const ic of ICONS) drawIcon(g, ic, ic === os.hover);
+  g.fillStyle = '#3B3F58'; g.fillRect(0, PIG.h - 20, PIG.w, 20);  // панель задач
+  g.fillStyle = '#7CFF5B'; g.fillRect(3, PIG.h - 17, 44, 14);
+  g.fillStyle = '#1A1424'; g.font = '14px VT323, monospace'; g.textAlign = 'center'; g.fillText('ПУСК', 25, PIG.h - 6);
+  const d = new Date(); g.fillStyle = '#C9D3E0'; g.textAlign = 'right';
+  g.fillText(`${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`, PIG.w - 6, PIG.h - 6);
+  if (os.toast > 0) {                                             // окошко-ошибка
+    g.fillStyle = '#C9D3E0'; g.fillRect(90, 80, 170, 60); g.fillStyle = '#1A1424'; g.fillRect(90, 80, 170, 14);
+    g.fillStyle = '#E3262B'; g.font = '16px VT323, monospace'; g.textAlign = 'center';
+    g.fillText('ОШИБКА', 175, 91); g.fillStyle = '#1A1424';
+    g.fillText('ФАЙЛ ПОВРЕЖДЁН.', 175, 112); g.fillText('ЭТО ЗАЙМЁТ 5 МИНУТ', 175, 128);
+  }
+}
+function drawCursor(g, crosshair) {
+  const { x, y } = os.mouse;
+  if (crosshair) {
+    g.fillStyle = '#E3262B'; g.fillRect(x - 6, y, 4, 1); g.fillRect(x + 3, y, 4, 1); g.fillRect(x, y - 6, 1, 4); g.fillRect(x, y + 3, 1, 4);
+    return;
+  }
+  g.fillStyle = '#000'; g.beginPath(); g.moveTo(x - 1, y - 1); g.lineTo(x + 11, y + 11); g.lineTo(x + 5, y + 11); g.lineTo(x + 7, y + 16);
+  g.lineTo(x + 4, y + 17); g.lineTo(x + 2, y + 12); g.lineTo(x - 1, y + 15); g.fill();
+  g.fillStyle = '#fff'; g.beginPath(); g.moveTo(x, y + 1); g.lineTo(x + 9, y + 10); g.lineTo(x + 4, y + 10); g.lineTo(x + 6, y + 15);
+  g.lineTo(x + 5, y + 15); g.lineTo(x + 3, y + 11); g.lineTo(x, y + 13); g.fill();
+}
+function screenUpdate(dt) {
+  if (os.toast > 0) os.toast -= dt;
+  if (os.app === 'pig') pigUpdate(dt);
+  if (os.app === 'raid') raidUpdate(dt);
+}
+function screenDraw() {
+  const g = pg;
+  if (os.app === 'desktop') drawDesktop(g);
+  if (os.app === 'pig') pigDraw();
+  if (os.app === 'raid') raidDraw(g);
+  if (os.app !== 'pig') drawCursor(g, os.app === 'raid');
+  g.fillStyle = 'rgba(0,0,0,.25)'; for (let yy = 0; yy < PIG.h; yy += 3) g.fillRect(0, yy, PIG.w, 1); // сканлайны ЭЛТ
+  pigTex.needsUpdate = true;
+}
+function screenClick() {
+  SFX.click();
+  if (os.app === 'desktop' && os.hover) openApp(os.hover.id);
+  else if (os.app === 'raid') raidShoot();
+}
+const APP_HINT = {
+  desktop: 'МЫШЬ — курсор · ЛКМ — открыть · ESC — встать из-за компа',
+  pig:     'ПРОБЕЛ — прыжок свиньи · ESC — на рабочий стол',
+  raid:    'WASD — идти · ЛКМ — стрелять · ESC — на рабочий стол',
+};
+
+// ---------------------------------------------------------------------
+//  МИНИИГРА «ТАРКОВ: ПОДВАЛ» — вид сверху. Собери лут, не сдохни,
+//  дойди до экстракта. Дикие (скавы) ходят и стреляют.
+// ---------------------------------------------------------------------
+const RAID_WALLS = [[70, 40, 12, 90], [150, 120, 90, 12], [230, 30, 12, 70], [110, 180, 12, 50], [260, 160, 50, 12]];
+const LOOT_TYPES = [
+  { name: 'ВИДЕОКАРТА', value: 120, color: '#7CFF5B' }, { name: 'ТУШЁНКА', value: 15, color: '#C9D3E0' },
+  { name: 'ШАУРМА', value: 25, color: '#e6cf9a' },     { name: 'ЭНЕРГОС', value: 20, color: '#2EE6FF' },
+  { name: 'ПАТРОНЫ', value: 30, color: '#FF8A2B' },     { name: 'ЖЁСТКИЙ ДИСК', value: 80, color: '#FF2E9A' },
+];
+const raid = {};
+const hitsWall = (x, y, r) => x < r || y < r || x > PIG.w - r || y > PIG.h - 20 - r ||
+  RAID_WALLS.some(([wx, wy, ww, wh]) => x + r > wx && x - r < wx + ww && y + r > wy && y - r < wy + wh);
+function freeSpot(minDist = 0) {
+  for (;;) {
+    const x = 15 + Math.random() * (PIG.w - 30), y = 15 + Math.random() * (PIG.h - 50);
+    if (!hitsWall(x, y, 8) && Math.hypot(x - 24, y - 190) > minDist) return { x, y };
+  }
+}
+function raidNew() {
+  Object.assign(raid, { state: 'brief', time: 90, hp: 3, cash: 0, cool: 0, msg: '', msgT: 0,
+    p: { x: 24, y: 190 }, bullets: [], loot: [], scavs: [], ex: { x: 270, y: 8, w: 44, h: 28 } });
+  for (let i = 0; i < 6; i++) raid.loot.push({ ...freeSpot(40), ...LOOT_TYPES[Math.floor(Math.random() * LOOT_TYPES.length)] });
+  for (let i = 0; i < 3; i++) raid.scavs.push({ ...freeSpot(110), hp: 2, cool: 1 + Math.random(), dir: Math.random() * 7 });
+}
+function raidShoot() {
+  if (raid.state !== 'run') { if (raid.state === 'brief' || raid.state === 'end') { raidNew(); raid.state = 'run'; } return; }
+  if (raid.cool > 0) return;
+  const a = Math.atan2(os.mouse.y - raid.p.y, os.mouse.x - raid.p.x);
+  raid.bullets.push({ x: raid.p.x, y: raid.p.y, vx: Math.cos(a) * 280, vy: Math.sin(a) * 280, mine: true });
+  raid.cool = 0.25;
+}
+function raidEnd(text) { raid.state = 'end'; raid.msg = text; }
+function raidUpdate(dt) {
+  if (raid.state !== 'run') return;
+  const P = raid.p;
+  raid.time -= dt; raid.cool -= dt;
+  if (raid.time <= 0) return raidEnd('ПРОПАЛ БЕЗ ВЕСТИ');
+  // ходьба игрока (WASD), стены не пускают
+  let mx = (keys.KeyD || keys.ArrowRight ? 1 : 0) - (keys.KeyA || keys.ArrowLeft ? 1 : 0);
+  let my = (keys.KeyS || keys.ArrowDown ? 1 : 0) - (keys.KeyW || keys.ArrowUp ? 1 : 0);
+  const l = Math.hypot(mx, my) || 1, sp = 70 * dt;
+  if (!hitsWall(P.x + mx / l * sp, P.y, 5)) P.x += mx / l * sp;
+  if (!hitsWall(P.x, P.y + my / l * sp, 5)) P.y += my / l * sp;
+  // подбираем лут
+  raid.loot = raid.loot.filter(it => {
+    if (Math.hypot(it.x - P.x, it.y - P.y) > 9) return true;
+    raid.cash += it.value; raid.msg = '+ ' + it.name; raid.msgT = 1.5; return false;
+  });
+  if (raid.msgT > 0) raid.msgT -= dt;
+  // экстракт
+  const ex = raid.ex;
+  if (P.x > ex.x && P.x < ex.x + ex.w && P.y > ex.y && P.y < ex.y + ex.h) return raidEnd('ЭВАКУАЦИЯ ✔');
+  // дикие: бродят, а если видят рядом — идут к тебе и стреляют
+  for (const s of raid.scavs) {
+    const d = Math.hypot(P.x - s.x, P.y - s.y), close = d < 120;
+    if (close) s.dir = Math.atan2(P.y - s.y, P.x - s.x); else if (Math.random() < dt) s.dir += (Math.random() - 0.5) * 3;
+    const v = (close && d < 50 ? 0 : 28) * dt;
+    const nx = s.x + Math.cos(s.dir) * v, ny = s.y + Math.sin(s.dir) * v;
+    if (!hitsWall(nx, ny, 5)) { s.x = nx; s.y = ny; } else s.dir += Math.PI / 2;
+    s.cool -= dt;
+    if (close && s.cool <= 0) {
+      const a = s.dir + (Math.random() - 0.5) * 0.4;             // косой дикий
+      raid.bullets.push({ x: s.x, y: s.y, vx: Math.cos(a) * 140, vy: Math.sin(a) * 140, mine: false });
+      s.cool = 1.2 + Math.random();
+    }
+  }
+  // пули
+  for (const b of raid.bullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (hitsWall(b.x, b.y, 1)) b.dead = true;
+    if (b.mine) {
+      for (const s of raid.scavs) if (Math.hypot(b.x - s.x, b.y - s.y) < 6) { s.hp--; b.dead = true; }
+    } else if (Math.hypot(b.x - P.x, b.y - P.y) < 6) { raid.hp--; b.dead = true; }
+  }
+  raid.bullets = raid.bullets.filter(b => !b.dead);
+  raid.scavs = raid.scavs.filter(s => s.hp > 0);
+  if (raid.hp <= 0) { raid.cash = 0; raidEnd('ПОГИБ В РЕЙДЕ'); }
+}
+function raidDraw(g) {
+  g.fillStyle = '#2a2a22'; g.fillRect(0, 0, PIG.w, PIG.h);       // бетон
+  g.fillStyle = '#56584a'; for (const [x, y, w, h] of RAID_WALLS) g.fillRect(x, y, w, h);
+  const ex = raid.ex;                                              // зона эвакуации
+  g.fillStyle = 'rgba(124,255,91,.25)'; g.fillRect(ex.x, ex.y, ex.w, ex.h);
+  g.fillStyle = '#7CFF5B'; g.font = '12px VT323, monospace'; g.textAlign = 'center'; g.fillText('ЭКСТРАКТ', ex.x + ex.w / 2, ex.y + 17);
+  for (const it of raid.loot) { g.fillStyle = it.color; g.fillRect(it.x - 3, it.y - 3, 7, 7); }
+  for (const s of raid.scavs) { g.fillStyle = '#c94c3a'; g.fillRect(s.x - 5, s.y - 5, 10, 10); g.fillStyle = '#1A1424'; g.fillRect(s.x - 2 + Math.cos(s.dir) * 3, s.y - 2 + Math.sin(s.dir) * 3, 4, 4); }
+  for (const b of raid.bullets) { g.fillStyle = b.mine ? '#fff7b0' : '#ff8a80'; g.fillRect(b.x - 1, b.y - 1, 3, 3); }
+  const P = raid.p; g.fillStyle = CHARACTERS[current].color; g.fillRect(P.x - 5, P.y - 5, 10, 10);   // ты — цвет твоего перса
+  // HUD
+  g.fillStyle = '#1A1424'; g.fillRect(0, PIG.h - 20, PIG.w, 20);
+  g.font = '15px VT323, monospace'; g.textAlign = 'left';
+  g.fillStyle = '#E3262B'; g.fillText('ХП ' + '■'.repeat(Math.max(0, raid.hp)), 6, PIG.h - 6);
+  g.fillStyle = '#7CFF5B'; g.fillText(`ЛУТ ${raid.cash}K ₽`, 80, PIG.h - 6);
+  g.fillStyle = '#C9D3E0'; g.textAlign = 'right';
+  const tm = Math.max(0, Math.ceil(raid.time)); g.fillText(`${Math.floor(tm / 60)}:${String(tm % 60).padStart(2, '0')}`, PIG.w - 6, PIG.h - 6);
+  g.textAlign = 'center';
+  if (raid.msgT > 0 && raid.state === 'run') { g.fillStyle = '#7CFF5B'; g.fillText(raid.msg, PIG.w / 2, 16); }
+  if (raid.state !== 'run') {
+    g.fillStyle = 'rgba(10,10,8,.8)'; g.fillRect(30, 60, 260, 100);
+    g.fillStyle = raid.state === 'end' && raid.msg.startsWith('ЭВАК') ? '#7CFF5B' : '#C9D3E0';
+    g.font = '30px VT323, monospace';
+    g.fillText(raid.state === 'brief' ? 'РЕЙД: ПОДВАЛ' : raid.msg, PIG.w / 2, 95);
+    g.font = '16px VT323, monospace'; g.fillStyle = '#C9D3E0';
+    g.fillText(raid.state === 'brief' ? 'СОБЕРИ ЛУТ И ДОЙДИ ДО ЭКСТРАКТА' : `ВЫНЕС: ${raid.cash}K ₽`, PIG.w / 2, 120);
+    g.fillText('ЛКМ — ' + (raid.state === 'brief' ? 'В РЕЙД' : 'ЕЩЁ РЕЙД'), PIG.w / 2, 142);
+  }
+}
+
+// Мышь → точка на экране монитора (луч из камеры в меш экрана)
+const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
+addEventListener('mousemove', e => {
+  if (!pcMode || sitT < SIT_TIME) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.set((e.clientX - r.left) / r.width * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObject(pcMode.screen)[0];
+  if (hit && hit.uv) { os.mouse.x = hit.uv.x * PIG.w; os.mouse.y = (1 - hit.uv.y) * PIG.h; }
+});
+addEventListener('mousedown', e => { if (pcMode && sitT > SIT_TIME && e.button === 0) screenClick(); });
+
+// ---------------------------------------------------------------------
+//  ПЕРСОНАЖ: low-poly моделька из блоков, смотрит вперёд по +Z
+// ---------------------------------------------------------------------
+// Кусочек модели: коробка нужного цвета внутри группы parent
+function part(parent, w, h, d, color, x, y, z, glowing = false) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), glowing ? glow(color) : mat(color));
+  m.position.set(x, y, z); parent.add(m); return m;
+}
+// Прядь/шип волос: четырёхгранный конус
+function spike(parent, color, x, y, z, rx, rz, len = 0.4, r = 0.14) {
+  const m = new THREE.Mesh(new THREE.ConeGeometry(r, len, 4), mat(color));
+  m.position.set(x, y, z); m.rotation.set(rx, 0, rz); parent.add(m); return m;
+}
+// Предмет в руке (крепится к кисти)
+function prop(hand, type) {
+  const g = new THREE.Group(); g.position.set(0, -0.05, 0.16); hand.add(g);
+  if (type === 'can') {                                             // энергетик Дани
+    cylIn(g, 0.1, 0.32, '#141414'); cylIn(g, 0.102, 0.12, '#7CFF5B', true);
+  } else if (type === 'shawarma') {                                 // шаурма Ярика
+    cylIn(g, 0.11, 0.36, '#e6cf9a').rotation.z = 0.3;
+    part(g, 0.16, 0.06, 0.16, '#a0522d', 0.05, 0.2, 0); part(g, 0.08, 0.05, 0.08, '#4caf50', 0.02, 0.24, 0.03);
+  } else if (type === 'vape') {                                     // электронка Эдика
+    part(g, 0.08, 0.24, 0.05, '#141414', 0, 0.05, 0); part(g, 0.04, 0.04, 0.052, '#FF2E9A', 0, 0.16, 0, true);
+  } else if (type === 'cola') {                                     // кола Эдика
+    cylIn(g, 0.075, 0.26, '#5a0d10'); cylIn(g, 0.035, 0.12, '#5a0d10').position.y = 0.19;
+    cylIn(g, 0.04, 0.03, '#E3262B').position.y = 0.26;
+  }
+}
+function cylIn(parent, r, h, color, glowing = false) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, h, 8), glowing ? glow(color) : mat(color));
+  parent.add(m); return m;
+}
+// Наушники: на голове (Ярик) или на шее (Эдик)
+function headphones(parent, c, y, onHead) {
+  const g = new THREE.Group(); g.position.y = y; parent.add(g);
+  const sx = onHead ? 0.5 : 0.3, z = onHead ? 0 : 0.18;
+  for (const s of [-1, 1]) {
+    part(g, 0.18, 0.38, 0.34, '#18161e', s * sx, 0, z);
+    part(g, 0.02, 0.26, 0.06, c.color, s * (sx + 0.1), 0, z + 0.05, true);   // светящаяся полоска
+  }
+  if (onHead) part(g, 1.05, 0.1, 0.16, '#18161e', 0, 0.5, 0);               // дужка
+  else part(g, 0.66, 0.08, 0.1, '#18161e', 0, 0.12, -0.05);
+}
+
+function makeCharacter(c) {
+  const root = new THREE.Group();
+  const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.55, 12),
+    new THREE.MeshBasicMaterial({ color: '#000', transparent: true, opacity: 0.45 }));
+  shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.02;
+  const rig = new THREE.Group(); rig.scale.setScalar(c.size * 0.85);   // то, что прыгает и поворачивается
+  root.add(shadow, rig);
+  const W = c.wide;
+
+  // Ноги (поворачиваются от бедра) с ботинками-утюгами
+  const legs = [-1, 1].map(s => {
+    const leg = new THREE.Group(); leg.position.set(s * 0.19 * W, 0.95, 0); rig.add(leg);
+    part(leg, 0.34, 0.75, 0.36, c.pants, 0, -0.4, 0);                            // мешковатые штаны
+    if (c.hoodie) part(leg, 0.08, 0.22, 0.2, c.pants, s * 0.2, -0.4, 0);          // карго-карман
+    part(leg, 0.36, 0.22, 0.5, c.shoes, 0, -0.84, 0.06);                         // ботинок
+    part(leg, 0.38, 0.06, 0.52, '#0d0c10', 0, -0.94, 0.06);                      // подошва
+    return leg;
+  });
+
+  // Торс
+  const torso = new THREE.Group(); torso.position.y = 0.95; rig.add(torso);
+  part(torso, 0.78 * W, 0.72, 0.44, c.shirt, 0, 0.36, 0);
+  if (c.hoodie) {
+    part(torso, 0.04, 0.68, 0.02, '#5a5a62', -0.12, 0.36, 0.23);                 // молнии худи
+    part(torso, 0.04, 0.68, 0.02, '#5a5a62', 0.12, 0.36, 0.23);
+    part(torso, 0.6, 0.3, 0.2, c.shirt, 0, 0.7, -0.24);                          // капюшон на спине
+  } else if (c.id === 'yarik') {
+    part(torso, 0.3, 0.03, 0.02, '#C9D3E0', 0, 0.62, 0.23);                      // цепочка
+  }
+
+  // Руки (качаются от плеча), крупные кисти
+  const arms = [-1, 1].map(s => {
+    const arm = new THREE.Group(); arm.position.set(s * (0.41 * W + 0.12), 1.6, 0); rig.add(arm);
+    part(arm, 0.26, c.hoodie ? 0.6 : 0.3, 0.28, c.shirt, 0, c.hoodie ? -0.27 : -0.12, 0); // рукав
+    if (!c.hoodie) part(arm, 0.18, 0.34, 0.2, c.skin, 0, -0.42, 0);                       // предплечье
+    const hand = part(arm, 0.24, 0.24, 0.26, c.skin, 0, -0.7, 0.02);                      // кисть
+    const item = s > 0 ? c.left : c.right;            // s=+1 — левая рука (персонаж смотрит на нас)
+    if (item) prop(hand, item);
+    return arm;
+  });
+
+  // Голова: большой куб, на лицевой грани — лицо с картинки
+  const head = new THREE.Group(); head.position.y = 1.67; rig.add(head);
+  const skinMat = mat(c.skin), faceMat = new THREE.MeshLambertMaterial({ color: c.skin });
+  const headMesh = new THREE.Mesh(new THREE.BoxGeometry(0.88, 0.98, 0.82),
+    [skinMat, skinMat, skinMat, skinMat, faceMat, skinMat]);   // порядок граней: +x −x +y −y +z(лицо) −z
+  headMesh.position.y = 0.49; head.add(headMesh);
+  const faces = {};
+  function setMood(mood) {                                    // меняет лицо: 'calm' или 'happy'
+    if (!faces[mood] || faceMat.map === faces[mood]) return;
+    faceMat.map = faces[mood]; faceMat.color.set('#fff'); faceMat.needsUpdate = true;
+  }
+  for (const mood of ['calm', 'happy']) new THREE.TextureLoader().load(ASSETS[c.id][mood], t => {
+    t.colorSpace = THREE.SRGBColorSpace; faces[mood] = t;
+    if (mood === 'calm' && !faceMat.map) setMood('calm');
+  }, undefined, () => {});
+  for (const s of [-1, 1]) part(head, 0.08, 0.2, 0.14, c.skin, s * 0.47, 0.42, 0);    // уши
+  if (c.earrings) for (const s of [-1, 1]) part(head, 0.03, 0.12, 0.03, '#C9D3E0', s * 0.48, 0.24, 0.02);
+
+  // Причёски
+  const H = c.hairColor;
+  if (c.hair === 'short') {                                   // Ярик: фейд + чуб вверх-набок
+    part(head, 0.9, 0.16, 0.84, H, 0, 1.0, -0.02);
+    for (let i = 0; i < 7; i++) spike(head, H, -0.3 + i * 0.1, 1.15, 0.1 - (i % 2) * 0.2, -0.3, -0.5 + (i % 3) * 0.2, 0.35, 0.13);
+  } else if (c.hair === 'shaggy') {                           // Даня: лохматые пряди во все стороны
+    part(head, 0.94, 0.2, 0.9, H, 0, 1.06, -0.02);            // шапка волос выше, лоб открыт
+    part(head, 0.96, 0.7, 0.3, H, 0, 0.62, -0.32);
+    for (let i = 0; i < 9; i++) {
+      const a = i / 9 * Math.PI * 2;
+      const front = Math.cos(a) > 0.5;                          // передние пряди торчат вверх, не на лицо
+      spike(head, H, Math.sin(a) * 0.4, front ? 1.2 : 1.1, Math.cos(a) * 0.3 - 0.05,
+        front ? 0.35 : Math.cos(a) * 0.9, -Math.sin(a) * 0.9, 0.45);
+    }
+    for (const s of [-1, 1]) for (let j = 0; j < 3; j++)
+      spike(head, H, s * 0.5, 0.75 - j * 0.22, -0.1 - j * 0.08, 0, -s * 2.4, 0.4, 0.12);
+  } else if (c.hair === 'long') {                             // Эдик: длинные волосы до живота, пробор
+    part(head, 0.94, 0.18, 0.88, H, 0, 1.0, -0.02);
+    part(head, 1.0, 1.75, 0.26, H, 0, 0.18, -0.38);           // спина
+    for (const s of [-1, 1]) {
+      part(head, 0.14, 1.5, 0.55, H, s * 0.5, 0.25, -0.1);    // боковые пряди
+      part(head, 0.12, 1.1, 0.16, H, s * 0.38, -0.12, 0.3);   // пряди спереди на плечах
+    }
+    part(head, 0.03, 0.04, 0.9, '#8a6a4e', 0, 1.1, 0);       // пробор
+  }
+  if (c.phones === 'head') headphones(head, c, 0.5, true);
+  if (c.phones === 'neck') headphones(torso, c, 0.74, false);
+
+  // Пивная кружка-гигант (размером почти с голову), видна только когда пьёт
+  const mug = new THREE.Group(); mug.position.set(0, -0.75, 0.25); mug.visible = false; arms[1].add(mug);
+  const beer = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.5, 8),
+    new THREE.MeshLambertMaterial({ color: '#FF8A2B', emissive: '#5a2a00', transparent: true, opacity: 0.9, flatShading: true }));
+  mug.add(beer);
+  const foam = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.12, 8), mat('#f4efe2'));
+  foam.position.y = 0.29; mug.add(foam);
+  part(mug, 0.06, 0.32, 0.18, '#C9D3E0', 0.27, 0, 0);                              // ручка
+
+  return { root, rig, head, legs, arms, shadow, mug, setMood };
+}
+
+// Облачка пара для Эдика
+const puffs = [];
+const puffMat = new THREE.MeshLambertMaterial({ color: '#C9D3E0', transparent: true, opacity: 0.5, flatShading: true });
+function spawnPuff(x, y, z) {
+  const m = new THREE.Mesh(new THREE.IcosahedronGeometry(0.15, 0), puffMat.clone());
+  m.position.set(x + (Math.random() - 0.5) * 0.2, y, z); scene.add(m);
+  puffs.push({ m, life: 0 });
+}
+function updatePuffs(dt) {
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i]; p.life += dt;
+    p.m.position.y += dt * 0.5; p.m.scale.setScalar(1 + p.life * 1.5);
+    p.m.material.opacity = Math.max(0, 0.5 - p.life * 0.2);
+    if (p.life > 2.5) { scene.remove(p.m); puffs.splice(i, 1); }
+  }
+}
+
+const players = CHARACTERS.map(makeCharacter);
+let current = null;                                   // индекс выбранного или null
+const player = { x: 0, z: 2, angle: 0, walk: 0, moving: false, jumpY: 0, vy: 0 };
+
+// Столкновения: круг игрока выталкивается из прямоугольников
+function collide(p, r = 0.4) {
+  p.x = Math.max(-ROOM.x + r, Math.min(ROOM.x - r, p.x));
+  p.z = Math.max(-ROOM.z + r, Math.min(ROOM.z - r, p.z));
+  for (const o of obstacles) {
+    const cx = Math.max(o.x1, Math.min(o.x2, p.x)), cz = Math.max(o.z1, Math.min(o.z2, p.z));
+    const dx = p.x - cx, dz = p.z - cz, d = Math.hypot(dx, dz);
+    if (d < r) {
+      if (d > 0.0001) { p.x = cx + dx / d * r; p.z = cz + dz / d * r; }
+      else { p.z = o.z2 + r; }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+//  Экран выбора и управление
+// ---------------------------------------------------------------------
+const selectEl = document.getElementById('select');
+const cardsEl = document.getElementById('cards');
+let highlighted = 0;
+CHARACTERS.forEach((c, i) => {
+  const d = document.createElement('div');
+  d.className = 'card'; d.style.setProperty('--c', c.color);
+  d.innerHTML = `<div class="face"></div><div class="name">${i + 1}. ${c.name}</div><div class="role">${c.role}</div>`;
+  d.querySelector('.face').style.background = `#E8B48F url(${ASSETS[c.id].head}) center 30% / 85% no-repeat`;
+  d.onclick = () => startGame(i);
+  d.onmouseenter = () => { highlighted = i; refreshCards(); };
+  cardsEl.appendChild(d);
+});
+function refreshCards() { [...cardsEl.children].forEach((d, i) => d.classList.toggle('active', i === highlighted)); }
+refreshCards();
+
+function startGame(i) {
+  current = i; SFX.select();
+  players.forEach(p => scene.remove(p.root));
+  scene.add(players[i].root);
+  Object.assign(player, { x: 0, z: 2, angle: 0, walk: 0, jumpY: 0, vy: 0 });
+  camLook.set(0, 1.6, 0.5);
+  camPos.set(0, 3.9, 9);
+  selectEl.classList.add('hidden');
+}
+function backToSelect() {
+  current = null;
+  players.forEach(p => scene.remove(p.root));
+  selectEl.classList.remove('hidden');
+  exitPC();
+  promptEl.classList.add('hidden'); drinkTime = 0; buzzTime = 0; soap = 0;
+  renderer.domElement.style.filter = '';
+}
+
+const keys = {};
+const DRINK_DURATION = 2.5;     // сколько секунд пьёт пиво
+const USE_DURATION = 1.2;       // сколько секунд длится действие на ЛКМ
+const USE_LABEL = { edik: 'затяжка', danya: 'глоток', yarik: 'кусь' };
+const USE_TEXT  = { edik: '* ПФФФ... *', danya: '* ПШ-Ш-Ш, ГЛЫК *', yarik: '* ХРУМ-ХРУМ *' };
+let useTime = 0;
+addEventListener('mousedown', e => {
+  if (e.button === 0 && current !== null && !pcMode && !slotMode && useTime <= 0 && drinkTime <= 0) {
+    useTime = USE_DURATION;
+    ({ edik: SFX.puff, danya: SFX.can, yarik: SFX.crunch })[CHARACTERS[current].id]();
+  }
+});
+const JUMP_POWER = 7;           // сила прыжка (больше = выше)
+const GRAVITY = 22;             // как быстро падает обратно
+const SIT_TIME = 0.7;           // сколько секунд садится за комп
+const BUZZ_DURATION = 15;     // сколько секунд держится «мыло» после пива
+let drinkTime = 0, nearBar = false, buzzTime = 0, soap = 0;
+const promptEl = document.getElementById('prompt');
+const promptTextEl = document.getElementById('promptText');
+addEventListener('keydown', e => {
+  if (slotMode) return;                                          // в слотах клавиши у мини-игры
+  keys[e.code] = true;
+  if (pcMode) {                                                   // за компом: управление миниигрой
+    if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+    if (os.app === 'pig' && (e.code === 'Space' || e.code === 'KeyW' || e.code === 'ArrowUp') && !e.repeat) pigJump();
+    if (e.code === 'Escape' || e.code === 'KeyF') {
+      if (os.app === 'desktop') exitPC(); else os.app = 'desktop';   // из игры — на рабочий стол
+    }
+    return;
+  }
+  if (current === null) {
+    if (e.code === 'ArrowLeft'  || e.code === 'KeyA') { highlighted = (highlighted + 2) % 3; refreshCards(); }
+    if (e.code === 'ArrowRight' || e.code === 'KeyD') { highlighted = (highlighted + 1) % 3; refreshCards(); }
+    if (['Digit1', 'Digit2', 'Digit3'].includes(e.code)) startGame(+e.code.slice(-1) - 1);
+    if (e.code === 'Enter' || e.code === 'Space') startGame(highlighted);
+  } else if (e.code === 'Escape') backToSelect();
+  else if (e.code === 'KeyF' && nearBar && drinkTime <= 0) { drinkTime = DRINK_DURATION; SFX.can(); }
+  else if (e.code === 'Space' && !e.repeat && player.jumpY === 0 && drinkTime <= 0) { player.vy = JUMP_POWER; SFX.jump(); }
+  else if (e.code === 'KeyF' && nearPC && drinkTime <= 0 && player.jumpY === 0) { enterPC(nearPC); SFX.click(); }
+  else if (e.code === 'KeyF' && nearSlot && drinkTime <= 0 && player.jumpY === 0) { enterSlot(nearSlot); SFX.coin(); }
+  if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ---------------------------------------------------------------------
+//  Игровой цикл
+// ---------------------------------------------------------------------
+const osdMode = document.getElementById('osdMode');
+const hint = document.getElementById('hint');
+const timecode = document.getElementById('timecode');
+const clock = new THREE.Clock();
+const camPos = new THREE.Vector3(0, 6, 12);
+const camLook = new THREE.Vector3(0, 1.6, 0);   // куда смотрит камера (тоже плавно едет)
+let pcMode = null, nearPC = null, sitT = 0;   // sitT — сколько секунд садится               // за каким компом сидим / к какому подошли
+function enterPC(pc) {
+  pcMode = pc; sitT = 0; pc.screen.material = pigScreenMat; os.app = 'desktop';
+  promptEl.classList.add('hidden');
+}
+function exitPC() {
+  if (!pcMode) return;
+  pcMode.screen.material = glow('#7CFF5B'); pcMode = null;
+  player.x = 7.8;                                               // встаёт со стула
+}
+// Слот-машина: подошёл, F → камера наезжает на экран автомата → плавный переход в дизайн-слоты
+let slotMode = null, nearSlot = null, slotT = 0, slotOpened = false;
+function enterSlot(s) {
+  slotMode = s; slotT = 0; slotOpened = false;
+  promptEl.classList.add('hidden');
+  for (const k in keys) keys[k] = false;
+}
+function leaveSlot() { slotMode = null; player.z = -5.4; }
+const heroLight = new THREE.PointLight('#ffd9b8', 6, 4, 1); scene.add(heroLight);   // мягкий свет на персонажа
+
+function update(dt, t) {
+  if (current === null) {
+    // Экран выбора: камера медленно плывёт по клубу
+    camera.position.set(Math.sin(t * 0.15) * 6, 3.8, 9);
+    camera.lookAt(0, 2, -4);
+    osdMode.textContent = 'PLAY ▶'; hint.textContent = 'ОКТ. 20 2006';
+    return;
+  }
+  const c = CHARACTERS[current], p = players[current];
+  let dx = 0, dz = 0;
+  if (keys.ArrowLeft  || keys.KeyA) dx -= 1;
+  if (keys.ArrowRight || keys.KeyD) dx += 1;
+  if (keys.ArrowUp    || keys.KeyW) dz -= 1;
+  if (keys.ArrowDown  || keys.KeyS) dz += 1;
+  if (drinkTime > 0 || pcMode || slotMode) { dx = 0; dz = 0; }             // пока пьёт — стоит на месте
+  const len = Math.hypot(dx, dz);
+  player.moving = len > 0;
+  if (player.moving) {
+    player.x += dx / len * c.speed * dt;
+    player.z += dz / len * c.speed * dt;
+    player.walk += dt;
+    // Плавный поворот всем телом в сторону движения (по кратчайшему пути)
+    const target = Math.atan2(dx, dz);
+    let diff = target - player.angle;
+    diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+    player.angle += diff * Math.min(1, dt * 12);
+  } else player.walk = 0;
+  if (!pcMode) collide(player);
+
+  // Анимация: шаги руками-ногами, подпрыгивание; на месте — «дыхание»
+  const w = player.walk * 11;
+  const swing = player.moving ? Math.sin(w) * 0.7 : 0;
+  const bob = player.moving ? Math.abs(Math.sin(w)) * 0.12 : 0;
+  const breath = player.moving ? 1 : 1 + Math.sin(t * 2.5) * 0.015;
+  const base = c.size * 0.85;
+  p.root.position.set(player.x, 0, player.z);
+  // Прыжок: летит вверх, гравитация тянет вниз
+  if (player.vy !== 0 || player.jumpY > 0) {
+    player.vy -= GRAVITY * dt;
+    player.jumpY = Math.max(0, player.jumpY + player.vy * dt);
+    if (player.jumpY === 0) player.vy = 0;                      // приземлился
+  }
+  const air = player.jumpY > 0;
+  p.rig.position.y = (air ? 0 : bob) + player.jumpY;
+  p.rig.rotation.y = player.angle;
+  p.rig.rotation.z = player.moving ? Math.sin(w) * 0.05 : 0;
+  p.rig.scale.set(base / breath, base * breath, base / breath);
+  p.legs[0].rotation.x = swing;  p.legs[1].rotation.x = -swing;
+  p.arms[0].rotation.x = -swing * 0.8; p.arms[1].rotation.x = swing * 0.8;
+  p.head.rotation.z = player.moving ? Math.sin(w + 1) * 0.06 : Math.sin(t * 0.7) * 0.03;
+  p.shadow.scale.setScalar(Math.max(0.4, 1 - bob - player.jumpY * 0.3));   // тень меньше, когда в воздухе
+  if (air) {                                                    // в воздухе: ноги поджаты, руки вверх
+    p.legs[0].rotation.x = -0.5; p.legs[1].rotation.x = 0.3;
+    p.arms[0].rotation.x = -0.9; p.arms[1].rotation.x = -0.9;
+  }
+
+  // Стойка бара: подошёл близко — подсветка «F», нажал — пьёт пиво
+  nearBar = player.x > -4.2 && player.x < 3.2 && player.z < -3.6;
+  nearPC = player.x > 7 ? pcs.find(pc => Math.abs(player.z - pc.z) < 1.3) || null : null;
+  nearSlot = player.z < -5.2 && player.x > 5.5 && player.x < 9.2
+    ? slots.reduce((a, b) => Math.abs(player.x - a.x) < Math.abs(player.x - b.x) ? a : b) : null;
+  if (nearSlot && player.x < 8.9) nearPC = null;                // у автоматов — автоматы, а не комп
+  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ' : 'ВЫПИТЬ ПИВА';
+  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot) && drinkTime <= 0 && !pcMode && !slotMode));
+  p.mug.visible = drinkTime > 0;
+  if (drinkTime > 0) {
+    drinkTime -= dt;
+    if (drinkTime <= 0) buzzTime = BUZZ_DURATION;               // допил — начинается «мыло»
+    const k = 1 - drinkTime / DRINK_DURATION;                   // 0 → 1 за время питья
+    const lift = Math.min(1, k * 4, (1 - k) * 4);               // рука вверх, держит, вниз
+    p.arms[1].rotation.x = -2.5 * lift;
+    p.arms[1].rotation.z = -0.5 * lift;                        // кружка к лицу
+    p.head.rotation.x = -0.35 * lift;                           // запрокидывает голову
+    const toBar = Math.atan2(Math.sin(Math.PI - player.angle), Math.cos(Math.PI - player.angle));
+    player.angle += toBar * Math.min(1, dt * 8);                // лицом к стойке
+    hint.textContent = '* БУЛЬ-БУЛЬ-БУЛЬ *';
+  } else { p.arms[1].rotation.z = 0; p.head.rotation.x = 0; }
+
+  // ЛКМ: предмет в правой руке ко рту (затяжка / глоток / укус)
+  if (useTime > 0) {
+    useTime -= dt;
+    const k = 1 - Math.max(0, useTime) / USE_DURATION;
+    const lift = Math.min(1, k * 5, (1 - k) * 5);
+    p.arms[0].rotation.x = -2.4 * lift;
+    p.arms[0].rotation.z = 0.6 * lift;                          // к лицу, а не в сторону
+    if (drinkTime <= 0) p.head.rotation.x = (c.id === 'danya' ? -0.3 : 0.1) * lift;
+    hint.textContent = USE_TEXT[c.id];
+    if (c.id === 'edik' && useTime <= 0) {                        // выдох — большое облако пара
+      for (let i = 0; i < 6; i++) {
+        const v = new THREE.Vector3((Math.random() - 0.5) * 0.4, 0.3 + Math.random() * 0.3, 0.6); p.head.localToWorld(v);
+        spawnPuff(v.x, v.y, v.z);
+      }
+    }
+  } else p.arms[0].rotation.z = 0;
+
+  // После пива: весёлое лицо и мыльный экран на 15 секунд
+  if (buzzTime > 0) buzzTime = Math.max(0, buzzTime - dt);
+  p.setMood(buzzTime > 0 ? 'happy' : 'calm');
+  soap = buzzTime > 0 ? Math.min(1, (BUZZ_DURATION - buzzTime) * 1.5, buzzTime / 3) : 0;  // плавно вкл/выкл
+  renderer.domElement.style.filter = soap > 0
+    ? `blur(${2.5 * soap}px) saturate(${1 + 0.8 * soap}) hue-rotate(${Math.sin(t * 1.7) * 30 * soap}deg)`
+    : '';
+
+  heroLight.position.set(player.x, 2.6, player.z + 1.2);
+
+  // Садится за комп: подходит к стулу, ноги сгибаются, руки на клавиатуру
+  if (pcMode) {
+    sitT += dt;
+    const k = Math.min(1, sitT / SIT_TIME), move = Math.min(1, dt * 7);
+    player.x += (8.85 - player.x) * move;
+    player.z += (pcMode.z - player.z) * move;
+    p.legs[0].rotation.x = p.legs[1].rotation.x = -1.5 * k;        // бёдра горизонтально
+    p.arms[0].rotation.x = p.arms[1].rotation.x = -1.1 * k;        // руки вперёд, на клаву
+    p.rig.position.y = 0.06 * k;                                   // сел на сиденье
+    p.rig.rotation.z = 0;
+    if (os.app !== 'desktop' || keys.KeyW) p.arms[0].rotation.x += Math.sin(t * 30) * 0.08;  // клацает
+    screenDraw();
+  }
+
+  // Эдик пускает пар
+  if (c.id === 'edik' && (t % 2.5) < dt) {
+    const v = new THREE.Vector3(0, 0.35, 0.5); p.head.localToWorld(v); spawnPuff(v.x, v.y, v.z);
+  }
+
+  // Камера плавно едет за персонажем, сверху-сбоку
+  // За компом камера плавно подлетает к монитору, иначе едет за персонажем
+  const ease = 1 - Math.pow(pcMode ? 0.004 : 0.02, dt);   // к монитору — быстрее
+  if (slotMode) {
+    slotT += dt;
+    const s = slotMode, k = Math.min(1, dt * 6);
+    player.x += (s.x - player.x) * k; player.z += (-6.4 - player.z) * k;   // встаёт перед автоматом
+    player.angle += Math.atan2(Math.sin(Math.PI - player.angle), Math.cos(Math.PI - player.angle)) * k;
+    camPos.lerp(new THREE.Vector3(s.x, 1.5, -6.3), 1 - Math.pow(0.002, dt));   // наезд в экран
+    camLook.lerp(new THREE.Vector3(s.x, 1.45, s.z), 1 - Math.pow(0.002, dt));
+    hint.textContent = '* дёргает рычаг *';
+    if (slotT > 0.9 && !slotOpened) { slotOpened = true; openSlots({ onClose: leaveSlot }); }
+  } else if (pcMode && sitT > SIT_TIME + 0.2) {
+    camPos.lerp(new THREE.Vector3(9.15, 1.6, pcMode.z), ease);
+    camLook.lerp(new THREE.Vector3(10.33, 1.6, pcMode.z), ease);   // смотрит в центр экрана
+    const toPC = Math.atan2(Math.sin(Math.PI / 2 - player.angle), Math.cos(Math.PI / 2 - player.angle));
+    player.angle += toPC * Math.min(1, dt * 8);                 // перс поворачивается к монитору
+    screenUpdate(dt);
+    hint.textContent = APP_HINT[os.app];
+  } else {
+    if (pcMode) hint.textContent = '* садится за комп *';
+    camPos.lerp(new THREE.Vector3(player.x * 0.85, 3.4, Math.min(player.z + 5.5, ROOM.z + 2)), ease);
+    camLook.lerp(new THREE.Vector3(player.x, 1.6, player.z - 1.5), ease);
+  }
+  camera.position.copy(camPos);
+  camera.lookAt(camLook);
+  if (soap > 0) {                                               // «пьяная» камера качается
+    camera.rotation.z += Math.sin(t * 1.3) * 0.09 * soap;
+    camera.position.y += Math.sin(t * 2.1) * 0.15 * soap;
+  }
+
+  osdMode.textContent = 'PLAY ▶ ' + c.name;
+  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · ESC — назад';
+}
+
+// ---------------------------------------------------------------------
+//  ОНЛАЙН: друзья бегают в том же подвале. Каждый шлёт свою позицию
+//  через общую базу (~4 раза в секунду), чужих персов рисуем у себя.
+// ---------------------------------------------------------------------
+let room = null, db = null;
+const remotes = new Map();                           // id → { model, cid, s, x, z, angle, walk }
+// Комната claude.ai пускает не всех гостей, а общая база работает у всех —
+// поэтому позиции идут через db: у каждого вкладки свой документ online/<id>.
+const NET_ID = (() => { try { return sessionStorage.nga_id || (sessionStorage.nga_id = Math.random().toString(36).slice(2, 10)); }
+  catch { return Math.random().toString(36).slice(2, 10); } })();
+(async () => {
+  [room, db] = await Promise.all([window.claude?.use?.('room'), window.claude?.use?.('db')]);
+  if (!db) return;
+  db.collection('online').onSnapshot(snap => syncPeers(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+  addEventListener('pagehide', () => db.collection('online').doc(NET_ID).delete().catch(() => {}));
+})();
+function syncPeers(docs) {
+  const seen = new Set(), now = Date.now();
+  for (const d of docs) {
+    const s = d.s;
+    if (d.id === NET_ID || !s || s.c == null || !CHARACTERS[s.c] || now - (d.t || 0) > 60000) continue;   // совсем старые записи (часы у всех чуть разные)
+    seen.add(d.id);
+    let r = remotes.get(d.id);
+    if (!r || r.cid !== s.c) {                       // новый игрок или сменил перса
+      if (r) scene.remove(r.model.root);
+      r = { model: makeCharacter(CHARACTERS[s.c]), cid: s.c, x: s.x, z: s.z, angle: s.a, walk: 0 };
+      scene.add(r.model.root); remotes.set(d.id, r);
+    }
+    if (r.t !== d.t) r.seen = now;                 // свежесть считаем по своим часам
+    r.s = s; r.t = d.t;
+  }
+  for (const [id, r] of remotes) if (!seen.has(id)) { scene.remove(r.model.root); remotes.delete(id); }
+}
+let netLast = 0, netKey = '', netBeat = 0;
+function netTick(t) {
+  if (!db || t - netLast < 0.25) return;            // 4 раза в секунду, между пакетами сглаживаем
+  netLast = t;
+  for (const [id, r] of remotes) if (Date.now() - (r.seen || 0) > 8000) { scene.remove(r.model.root); remotes.delete(id); }  // закрыл вкладку
+  const r2 = v => Math.round(v * 100) / 100;
+  const s = current === null ? { c: null } : {
+    c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle), j: r2(player.jumpY),
+    m: player.moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
+  };
+  const key = JSON.stringify(s);
+  if (key === netKey && t - netBeat < 3) return;     // стоит на месте — раз в 3 с «я тут»
+  netKey = key; netBeat = t;
+  db.collection('online').doc(NET_ID).set({ s, t: Date.now() }).catch(() => {});
+}
+function updateRemotes(dt) {
+  for (const r of remotes.values()) {
+    const s = r.s, m = r.model, k = Math.min(1, dt * 6);
+    r.x += (s.x - r.x) * k; r.z += (s.z - r.z) * k;   // сглаживаем между пакетами
+    const da = s.a - r.angle; r.angle += Math.atan2(Math.sin(da), Math.cos(da)) * k;
+    r.walk = s.m ? r.walk + dt : 0;
+    const w = r.walk * 11, swing = s.m ? Math.sin(w) * 0.7 : 0, bob = s.m ? Math.abs(Math.sin(w)) * 0.12 : 0;
+    m.root.position.set(r.x, 0, r.z);
+    m.rig.position.y = bob + (s.j || 0) + (s.sit ? 0.06 : 0);
+    m.rig.rotation.y = r.angle;
+    m.legs[0].rotation.x = s.sit ? -1.5 : swing; m.legs[1].rotation.x = s.sit ? -1.5 : -swing;
+    m.arms[0].rotation.x = s.u ? -2.4 : s.sit ? -1.1 : -swing * 0.8;
+    m.arms[1].rotation.x = s.d ? -2.5 : s.sit ? -1.1 : swing * 0.8;
+    m.mug.visible = !!s.d;
+    m.setMood(s.b ? 'happy' : 'calm');
+  }
+}
+
+// ---------------------------------------------------------------------
+//  ЗВУКИ: всё синтезируется WebAudio, файлов не нужно.
+//  Браузер разрешает звук только после первого нажатия — тогда и включаем.
+// ---------------------------------------------------------------------
+let ac = null, noiseBuf = null;
+function audioOn() {
+  if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+  ac = new AudioContext();
+  noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  // фон: гул подвала + жужжание неона
+  const hum = ac.createOscillator(), hg = ac.createGain(); hum.type = 'sawtooth'; hum.frequency.value = 50;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180;
+  hg.gain.value = 0.025; hum.connect(lp).connect(hg).connect(ac.destination); hum.start();
+}
+addEventListener('keydown', audioOn); addEventListener('mousedown', audioOn);
+function tone(f, dur, type = 'square', vol = 0.08, f2 = f, t0 = 0) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime + t0;
+  o.type = type; o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f2, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + dur);
+}
+function noise(dur, freq, vol = 0.15, t0 = 0) {
+  if (!ac) return;
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain(), t = ac.currentTime + t0;
+  s.buffer = noiseBuf; f.type = 'bandpass'; f.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  s.connect(f).connect(g).connect(ac.destination); s.start(t, Math.random() * 0.5); s.stop(t + dur);
+}
+const SFX = {
+  step:   () => noise(0.07, 300 + Math.random() * 200, 0.22),
+  jump:   () => tone(180, 0.18, 'square', 0.06, 520),
+  land:   () => noise(0.12, 160, 0.3),
+  gulp:   () => tone(140, 0.12, 'sine', 0.2, 70),
+  puff:   () => noise(0.6, 1200, 0.1),
+  crunch: () => { for (let i = 0; i < 3; i++) noise(0.05, 2500, 0.12, i * 0.07); },
+  can:    () => { noise(0.25, 4000, 0.08); tone(300, 0.1, 'sine', 0.1, 200, 0.2); },
+  click:  () => tone(900, 0.04, 'square', 0.05),
+  coin:   () => [988, 1319].forEach((f, i) => tone(f, 0.25, 'square', 0.06, f, i * 0.08)),
+  select: () => tone(440, 0.08, 'square', 0.05, 880),
+};
+let stepT = 0, wasAir = false, gulpT = 0;
+function soundTick(dt) {
+  if (current === null || pcMode || slotMode) return;
+  stepT -= dt;
+  if (player.moving && player.jumpY === 0 && stepT <= 0) { SFX.step(); stepT = 0.32; }
+  const air = player.jumpY > 0;
+  if (wasAir && !air) SFX.land();
+  wasAir = air;
+  if (drinkTime > 0) { gulpT -= dt; if (gulpT <= 0 && drinkTime < DRINK_DURATION - 0.6) { SFX.gulp(); gulpT = 0.45; } }
+}
+
+function loop() {
+  const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
+  update(dt, t); updatePuffs(dt); updateRemotes(dt); netTick(t); soundTick(dt);
+  // статус сети прямо в OSD: видно, подключился ли ты и сколько людей на странице
+  osdMode.textContent += !db ? ' · ОФЛАЙН' : ` · ОНЛАЙН: ${remotes.size + 1}`;
+  renderer.render(scene, camera);
+  const s = Math.floor(t), pad = n => String(n).padStart(2, '0');
+  timecode.textContent = `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
