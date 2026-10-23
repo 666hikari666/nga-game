@@ -1054,7 +1054,7 @@ function update(dt, t) {
 
 // ---------------------------------------------------------------------
 //  ОНЛАЙН: друзья бегают в том же подвале. Каждый шлёт свою позицию
-//  через общую базу (~4 раза в секунду), чужих персов рисуем у себя.
+//  через общую базу (только при изменениях), чужих персов рисуем у себя.
 // ---------------------------------------------------------------------
 let room = null, db = null;
 const remotes = new Map();                           // id → { model, cid, s, x, z, angle, walk }
@@ -1068,14 +1068,14 @@ const NET_ID = (() => { try { return sessionStorage.nga_id || (sessionStorage.ng
   const onSnap = snap => syncPeers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
   db.collection('online').onSnapshot(onSnap);
   // живые обновления доходят не у всех — дополнительно сами спрашиваем базу
-  setInterval(() => db.collection('online').get().then(onSnap).catch(() => {}), 400);
+  setInterval(() => db.collection('online').get().then(onSnap).catch(() => {}), 500);
   addEventListener('pagehide', () => db.collection('online').doc(NET_ID).delete().catch(() => {}));
 })();
 function syncPeers(docs) {
   const seen = new Set(), now = Date.now();
   for (const d of docs) {
     const s = d.s;
-    if (d.id === NET_ID || !s || s.c == null || !CHARACTERS[s.c] || now - (d.t || 0) > 60000) continue;   // совсем старые записи (часы у всех чуть разные)
+    if (d.id === NET_ID || !s || s.c == null || !CHARACTERS[s.c] || now - (d.t || 0) > 120000) continue;   // совсем старые записи (часы у всех чуть разные)
     seen.add(d.id);
     let r = remotes.get(d.id);
     if (!r || r.cid !== s.c) {                       // новый игрок или сменил перса
@@ -1088,33 +1088,61 @@ function syncPeers(docs) {
   }
   for (const [id, r] of remotes) if (!seen.has(id)) { scene.remove(r.model.root); remotes.delete(id); }
 }
-let netLast = 0, netKey = '', netBeat = 0, netErr = '';
-function netTick(t) {
-  if (!db || t - netLast < 0.25) return;            // 4 раза в секунду, между пакетами сглаживаем
-  netLast = t;
-  for (const [id, r] of remotes) if (Date.now() - (r.seen || 0) > 8000) { scene.remove(r.model.root); remotes.delete(id); }  // закрыл вкладку
+// У гостей claude.ai ограничено число записей в базу, поэтому шлём не позицию каждые 0.25 с,
+// а «куда и с какой скоростью иду»: у друга перс сам доезжает по этой скорости,
+// новая запись — только когда что-то поменялось (повернул, остановился, пьёт...) или расхождение > 1 м.
+let netErr = '', netWait = 0, netSent = null, netSentAt = 0, prevX = 0, prevZ = 0, velX = 0, velZ = 0, jumpAt = 0, netUp = false;
+const NET_MIN_GAP = 0.6, NET_BEAT = 20, NET_STALE = 45000;
+function netTick(t, dt) {
+  if (!db) return;
+  if (dt > 0) {                                      // сглаженная скорость по кадрам
+    const k = Math.min(1, dt * 10);
+    velX += ((player.x - prevX) / dt - velX) * k; velZ += ((player.z - prevZ) / dt - velZ) * k;
+  }
+  prevX = player.x; prevZ = player.z;
+  if (player.vy > 0 && !netUp) jumpAt = Date.now();               // начало прыжка — у друга проиграется сам
+  netUp = player.vy > 0;
+  for (const [id, r] of remotes) if (Date.now() - (r.seen || 0) > NET_STALE) { scene.remove(r.model.root); remotes.delete(id); }
+  if (t < netWait || t - netSentAt < NET_MIN_GAP) return;
   // база отвергает NaN/Infinity и -0 (invalid_argument) — чистим числа перед отправкой
   const r2 = v => Number.isFinite(v) ? (Math.round(v * 100) / 100) || 0 : 0;
+  const moving = player.moving && !pcMode && !slotMode;
   const s = current === null ? { c: null } : {
-    c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle), j: r2(player.jumpY),
-    m: player.moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
+    c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle),
+    vx: moving ? r2(velX) : 0, vz: moving ? r2(velZ) : 0, jt: jumpAt,
+    m: moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
   };
-  const key = JSON.stringify(s);
-  if (key === netKey && t - netBeat < 3) return;     // стоит на месте — раз в 3 с «я тут»
-  netKey = key; netBeat = t;
+  const p = netSent;
+  let need = !p || t - netSentAt > NET_BEAT || ['c', 'm', 'd', 'u', 'b', 'sit', 'jt'].some(k => p[k] !== s[k]);
+  if (!need && s.c != null) {
+    const age = t - netSentAt, px = p.x + p.vx * age, pz = p.z + p.vz * age;   // где перс у друга сейчас
+    need = Math.hypot(px - s.x, pz - s.z) > 1 || Math.hypot(p.vx - s.vx, p.vz - s.vz) > 1.5 || (!s.m && Math.abs(p.a - s.a) > 0.6);
+  }
+  if (!need) return;
+  netSent = s; netSentAt = t;
   db.collection('online').doc(NET_ID).set({ s, t: Date.now() })
     .then(() => { netErr = ''; })
-    .catch(e => { netErr = [e?.code, e?.message].filter(Boolean).join(' ') || 'ошибка'; netKey = ''; });   // покажем в OSD и повторим
+    .catch(e => {                                     // лимит — ждём и шлём снова
+      netErr = [e?.code, e?.message].filter(Boolean).join(' ') || 'ошибка';
+      netSent = null; netWait = t + 15;
+    });
 }
+const JUMP_T = 2 * JUMP_POWER / GRAVITY;             // сколько длится прыжок
 function updateRemotes(dt) {
+  const now = Date.now();
   for (const r of remotes.values()) {
-    const s = r.s, m = r.model, k = Math.min(1, dt * 6);
-    r.x += (s.x - r.x) * k; r.z += (s.z - r.z) * k;   // сглаживаем между пакетами
+    const s = r.s, m = r.model, k = Math.min(1, dt * 8);
+    const age = Math.min(3, (now - r.seen) / 1000);  // доезжает по скорости, но не дальше 3 с
+    const tx = s.x + (s.vx || 0) * age, tz = s.z + (s.vz || 0) * age;
+    r.x += (tx - r.x) * k; r.z += (tz - r.z) * k;
     const da = s.a - r.angle; r.angle += Math.atan2(Math.sin(da), Math.cos(da)) * k;
     r.walk = s.m ? r.walk + dt : 0;
     const w = r.walk * 11, swing = s.m ? Math.sin(w) * 0.7 : 0, bob = s.m ? Math.abs(Math.sin(w)) * 0.12 : 0;
+    const jt = (now - (r.jtLocal || 0)) / 1000;      // прыжок по формуле, без лишних записей
+    if (s.jt && s.jt !== r.jtSeen) { r.jtSeen = s.jt; r.jtLocal = now; }
+    const jumpY = jt < JUMP_T ? JUMP_POWER * jt - GRAVITY * jt * jt / 2 : 0;
     m.root.position.set(r.x, 0, r.z);
-    m.rig.position.y = bob + (s.j || 0) + (s.sit ? 0.06 : 0);
+    m.rig.position.y = bob + Math.max(0, jumpY) + (s.sit ? 0.06 : 0);
     m.rig.rotation.y = r.angle;
     m.legs[0].rotation.x = s.sit ? -1.5 : swing; m.legs[1].rotation.x = s.sit ? -1.5 : -swing;
     m.arms[0].rotation.x = s.u ? -2.4 : s.sit ? -1.1 : -swing * 0.8;
@@ -1179,7 +1207,7 @@ function soundTick(dt) {
 
 function loop() {
   const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
-  update(dt, t); updatePuffs(dt); updateRemotes(dt); netTick(t); soundTick(dt);
+  update(dt, t); updatePuffs(dt); updateRemotes(dt); netTick(t, dt); soundTick(dt);
   // статус сети прямо в OSD: видно, подключился ли ты и сколько людей на странице
   osdMode.textContent += !db ? ' · ОФЛАЙН' : ` · ОНЛАЙН: ${remotes.size + 1}` + (netErr ? ` · НЕ ОТПРАВЛЯЕТСЯ: ${netErr}` : '');
   renderer.render(scene, camera);
