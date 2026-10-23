@@ -74,7 +74,7 @@ CONFIG = {
                     glow='#2EE6FF', band='#9a9aa2', hookah='#2f6f9a', metal='#C9D3E0', hose='#2b2b30'),
         hip=0.34, neck=0.63, legx=0.07, arms={'R': (0.17, 0.58)},                   # левая рука держит шланг — неподвижна
         armZ=lambda cx, cy, m: (cx > 0.135 - m) & (cy > 0.18 - m) & (cy < 0.6 + m),
-        FB=(-0.115, 0.115, 0.59, 0.88), fringe=False),
+        FB=(-0.11, 0.11, 0.612, 0.875), fringe=False, fold=0.07),   # низ маски — по подбородку, не ниже
     'edik': dict(label=edik, zshift=0.15, skin='#e8ac7f',
         remove=lambda x, y, z: ((z > 0.02) & (y > 0.64)) | ((z > -0.045) & (y > 0.66) & (y < 0.765)),   # облако пара и его начало у рта
         colors=dict(hair='#4a2c1c', top='#1e1c24', pants='#2e3240', shoe='#1a181e', sole='#0d0c10', phones='#16161c', vape='#141414'),
@@ -157,7 +157,7 @@ for _ in range(40):                              # пустые клетки —
 depth = np.nan_to_num(depth, nan=np.nanmedian(SV[:, 2])) + 0.004
 # края маски загибаем внутрь головы: бока и верх уходят под волосы, рамки не видно
 uu = np.abs(np.linspace(-1, 1, GX))[None, :]; vv = np.linspace(0, 1, GY)[:, None]
-depth -= 0.045 * np.maximum(np.clip((uu - 0.7) / 0.3, 0, 1) ** 2, np.clip((vv - 0.8) / 0.2, 0, 1) ** 2)
+depth -= cfg.get('fold', 0.045) * np.maximum(np.clip((uu - 0.7) / 0.3, 0, 1) ** 2, np.clip((vv - 0.8) / 0.2, 0, 1) ** 2)
 
 PIV = {'torso': (0, 0, 0), 'head': (0, NECK, 0), 'legL': (-cfg['legx'], HIP, 0), 'legR': (cfg['legx'], HIP, 0), 'face': (0, NECK, 0)}
 for k, (ax_, ay_) in cfg['arms'].items(): PIV['arm' + k] = (ax_, ay_, 0)
