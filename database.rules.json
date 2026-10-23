@@ -1,0 +1,25 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "online": {
+      ".read": true,
+      "$id": {
+        ".write": true,
+        ".validate": "!newData.exists() || (newData.hasChildren(['s', 't']) && newData.child('t').isNumber())"
+      }
+    },
+    "tries": {
+      ".read": true,
+      "$id": { ".write": true }
+    },
+    "state": {
+      ".read": true,
+      "live": { ".write": true }
+    },
+    "config": {
+      ".read": true,
+      "styles": { ".write": true }
+    }
+  }
+}
