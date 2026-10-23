@@ -1093,7 +1093,8 @@ function netTick(t) {
   if (!db || t - netLast < 0.25) return;            // 4 раза в секунду, между пакетами сглаживаем
   netLast = t;
   for (const [id, r] of remotes) if (Date.now() - (r.seen || 0) > 8000) { scene.remove(r.model.root); remotes.delete(id); }  // закрыл вкладку
-  const r2 = v => Math.round(v * 100) / 100;
+  // база отвергает NaN/Infinity и -0 (invalid_argument) — чистим числа перед отправкой
+  const r2 = v => Number.isFinite(v) ? (Math.round(v * 100) / 100) || 0 : 0;
   const s = current === null ? { c: null } : {
     c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle), j: r2(player.jumpY),
     m: player.moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
@@ -1103,7 +1104,7 @@ function netTick(t) {
   netKey = key; netBeat = t;
   db.collection('online').doc(NET_ID).set({ s, t: Date.now() })
     .then(() => { netErr = ''; })
-    .catch(e => { netErr = (e && (e.code || e.message)) || 'ошибка'; netKey = ''; });   // покажем в OSD и повторим
+    .catch(e => { netErr = [e?.code, e?.message].filter(Boolean).join(' ') || 'ошибка'; netKey = ''; });   // покажем в OSD и повторим
 }
 function updateRemotes(dt) {
   for (const r of remotes.values()) {
