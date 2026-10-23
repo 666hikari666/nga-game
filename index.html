@@ -106,10 +106,12 @@ const CHARACTERS = [
     model: 'assets/models/danya.glb' },   // 3D-модель (раскрашена и распилена assets/models/build.py)
   { id: 'yarik', name: 'ЯРИК', role: 'спокойный работяга', color: '#2EE6FF', speed: 4, skin: '#e8ab7f',
     size: 0.93, wide: 1.15, hair: 'short', hairColor: '#5e3420', shirt: '#1d1a24', pants: '#18161e',
-    shoes: '#1a181e', phones: 'head', hoodie: false, earrings: false, right: 'shawarma', left: null },
+    shoes: '#1a181e', phones: 'head', hoodie: false, earrings: false, right: 'shawarma', left: null,
+    model: 'assets/models/yarik.glb', modelProps: false },   // кальян и шланг уже в модели
   { id: 'edik',  name: 'ЭДИК', role: 'серьёзный геймер',   color: '#FF2E9A', speed: 5, skin: '#ebac7d',
     size: 1.03, wide: 0.92, hair: 'long', hairColor: '#5b3a26', shirt: '#1d1a24', pants: '#2b2f45',
-    shoes: '#1a181e', phones: 'neck', hoodie: false, earrings: false, right: 'vape', left: 'cola' },
+    shoes: '#1a181e', phones: 'neck', hoodie: false, earrings: false, right: 'vape', left: 'cola',
+    model: 'assets/models/edik.glb', modelProps: false },    // вейп уже в модели
 ];
 const SKIN = '#E8B48F';
 
@@ -810,10 +812,11 @@ function makeModelCharacter(c) {
   head.add(face); face.position.set(0, 0, 0);                   // лицо — часть головы, у них одна ось
   const faceMat = new THREE.MeshLambertMaterial({ map: FACES[c.id]?.neutral || null, flatShading: true });
   face.material = faceMat;
-  const legs = [get('legL'), get('legR')], arms = [get('armL'), get('armR')];
+  // у кого одна рука занята (шланг, вейп) — она часть торса и не качается; вместо неё пустая группа
+  const arm = n => src.getObjectByName(n) ? get(n) : body.add(new THREE.Group()).children.at(-1);
+  const legs = [get('legL'), get('legR')], arms = [arm('armL'), arm('armR')];
   const hands = arms.map(a => { const g = new THREE.Group(); g.position.set(0, -0.85, 0.02); a.add(g); return g; });
-  if (c.right) prop(hands[0], c.right);
-  if (c.left) prop(hands[1], c.left);
+  if (c.modelProps !== false) { if (c.right) prop(hands[0], c.right); if (c.left) prop(hands[1], c.left); }
   // пивная кружка (как у коробочных), видна только когда пьёт
   const mug = new THREE.Group(); mug.position.set(0, -0.85, 0.25); mug.visible = false; arms[1].add(mug);
   mug.add(new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.5, 8),

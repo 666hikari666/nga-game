@@ -1,0 +1,22 @@
+<!-- Просмотр моделей: model-view.html?m=yarik&e=rage&yaw=0.5&pitch=0.2&d=6&y=1.4 -->
+<!doctype html><body style="margin:0;background:#1A1424">
+<script type="importmap">{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }</script>
+<script type="module">
+import * as THREE from 'three'; import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const r = new THREE.WebGLRenderer(); r.setSize(innerWidth, innerHeight); document.body.appendChild(r.domElement);
+const s = new THREE.Scene(); s.add(new THREE.AmbientLight('#7a6f9a', 1.8)); s.add(new THREE.HemisphereLight('#C9D3E0', '#1A1424', 0.9));
+const l = new THREE.PointLight('#ffd9b8', 6, 4, 1); l.position.set(0, 2.6, 1.2); s.add(l);
+const cam = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 50);
+const p = new URLSearchParams(location.search); const yaw = +(p.get('yaw') || 0), pitch = +(p.get('pitch') || 0), who = p.get('m') || 'danya';
+const lin = v => v < 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+const g = await new GLTFLoader().loadAsync('assets/models/' + who + '.glb?' + Date.now());
+const tex = await new THREE.TextureLoader().loadAsync('assets/chars/' + who + '/face3d_' + (p.get('e') || 'neutral') + '.png'); tex.colorSpace = THREE.SRGBColorSpace;
+g.scene.traverse(o => { if (!o.isMesh) return; const c = o.geometry.attributes.color;
+  if (c) { const a = new Float32Array(c.count * 3); for (let i = 0; i < c.count; i++) { a[i*3] = lin(c.getX(i)); a[i*3+1] = lin(c.getY(i)); a[i*3+2] = lin(c.getZ(i)); }
+    o.geometry.setAttribute('color', new THREE.BufferAttribute(a, 3)); o.material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }); }
+  else o.material = new THREE.MeshLambertMaterial({ map: tex, flatShading: true }); });
+s.add(g.scene);
+const tgt = new THREE.Vector3(0, +(p.get('y') || 1.4), 0), dist = +(p.get('d') || 6);
+cam.position.set(Math.sin(yaw) * Math.cos(pitch) * dist, tgt.y + Math.sin(pitch) * dist, Math.cos(yaw) * Math.cos(pitch) * dist); cam.lookAt(tgt);
+r.render(s, cam);
+</script>
