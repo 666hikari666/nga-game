@@ -73,6 +73,7 @@
   </div>
 </div>
 
+<script type="module" src="firebase-net.js"></script>
 <script type="module">
 import * as THREE from 'three';
 import { openSlots, slotsOpen } from './slots/slots.js';
@@ -1092,7 +1093,7 @@ function syncPeers(docs) {
 // а «куда и с какой скоростью иду»: у друга перс сам доезжает по этой скорости,
 // новая запись — только когда что-то поменялось (повернул, остановился, пьёт...) или расхождение > 1 м.
 let netErr = '', netWait = 0, netSent = null, netSentAt = 0, prevX = 0, prevZ = 0, velX = 0, velZ = 0, jumpAt = 0, netUp = false;
-const NET_MIN_GAP = 0.6, NET_BEAT = 20, NET_STALE = 45000;
+const NET_MIN_GAP = 0.15, NET_BEAT = 10, NET_STALE = 25000;   // Firebase без жёстких лимитов — можно чаще
 function netTick(t, dt) {
   if (!db) return;
   if (dt > 0) {                                      // сглаженная скорость по кадрам
