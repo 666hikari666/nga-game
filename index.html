@@ -35,8 +35,19 @@
                  animation: pulse .8s ease-in-out infinite alternate; }
   @keyframes pulse { from { box-shadow: 0 0 6px #FF8A2B; transform: scale(1); } to { box-shadow: 0 0 26px #FF8A2B; transform: scale(1.12); } }
 
-  /* ===== Затемнение при переходе между этажами ===== */
-  #fade { position: absolute; inset: 0; background: #000; opacity: 0; transition: opacity .35s; pointer-events: none; z-index: 3; }
+  /* ===== Меню забивки кальяна ===== */
+  #hookahMenu { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4; min-width: 46%;
+                padding: 1.4vw 2vw; background: rgba(26,20,36,.88); border: 3px solid #B44CFF; box-shadow: 0 0 24px #B44CFF;
+                font-size: clamp(14px, 2.2vw, 28px); text-align: center; }
+  #hookahMenu .hm-title { font-size: 1.5em; color: #e2b0ff; text-shadow: 0 0 10px #B44CFF; margin-bottom: .4em; }
+  #hookahMenu .hm-row { display: flex; justify-content: center; gap: .6em; margin-bottom: .6em; }
+  .hm-st { padding: 0 .5em; border: 2px solid #5a4a70; cursor: pointer; opacity: .6; }
+  .hm-st.on { border-color: #FF8A2B; color: #FF8A2B; opacity: 1; box-shadow: 0 0 10px #FF8A2B; }
+  .hm-fl { display: flex; align-items: center; gap: .5em; padding: .1em .5em; cursor: pointer; text-align: left; }
+  .hm-fl:hover { background: rgba(255,255,255,.08); color: var(--c); }
+  .hm-n { display: inline-block; min-width: 1.3em; text-align: center; color: #1A1424; background: var(--c); }
+  .hm-dot { width: .8em; height: .8em; border-radius: 50%; background: var(--c); box-shadow: 0 0 8px var(--c); }
+  #hookahMenu .hm-help { margin-top: .6em; font-size: .7em; opacity: .7; }
 
   /* ===== VHS-оверлей (чистый CSS) ===== */
   .vhs { position: absolute; inset: 0; pointer-events: none; }
@@ -66,7 +77,12 @@
     <div class="cards" id="cards"></div>
   </div>
   <div id="prompt" class="hidden"><span class="key">F</span><span id="promptText">ВЫПИТЬ ПИВА</span></div>
-  <div id="fade"></div>
+  <div id="hookahMenu" class="hidden">
+    <div class="hm-title">ЗАБИВКА</div>
+    <div class="hm-row" id="hmStrength"></div>
+    <div id="hmList"></div>
+    <div class="hm-help">1–6 — вкус · ← → — крепость · ESC — отмена</div>
+  </div>
   <div class="vhs tracking"></div>
   <div class="vhs scanlines"></div>
   <div class="vhs vignette"></div>
@@ -128,7 +144,7 @@ if (location.protocol === 'file:') {
   document.getElementById('wrap').appendChild(warn);
 }
 
-const PIXELS = 480;   // ширина картинки в пикселях: меньше = больше «PS1-мыла»
+const PIXELS = 640;   // ширина картинки в пикселях: меньше = больше «PS1-мыла»
 
 // ---------------------------------------------------------------------
 //  Сцена, камера, рендер
@@ -136,6 +152,7 @@ const PIXELS = 480;   // ширина картинки в пикселях: ме
 const wrap = document.getElementById('wrap');
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(1);
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.BasicShadowMap;   // пиксельные тени от солнца на террасе
 renderer.setSize(PIXELS, PIXELS * 9 / 16, false);
 wrap.prepend(renderer.domElement);
 
@@ -150,6 +167,11 @@ const obstacles = [];   // прямоугольники, через которы
 // Этажи: 0 — подвал, 1 — второй этаж с террасой (стоит прямо на потолке подвала)
 const Y2 = 5.3;
 const floorY = f => f ? Y2 : 0;
+// Лестница между этажами: колонна x1…x2, ступени от zLow (внизу) до zTop (наверху)
+const STAIR = { x1: 3.0, x2: 5.4, zLow: -1, zTop: -6 };
+const inStairs = (x, z) => x > STAIR.x1 && x < STAIR.x2 && z < STAIR.zLow && z > STAIR.zTop;
+// На какой высоте стоит перс: на лестнице — по ступенькам, иначе пол своего этажа
+const standY = (f, x, z) => inStairs(x, z) ? Y2 * (STAIR.zLow - z) / (STAIR.zLow - STAIR.zTop) : floorY(f);
 let BUILD_FLOOR = 0;                     // какой этаж сейчас строим: свет и препятствия запоминают этаж
 const lightsByFloor = [[], []];          // свет одного этажа выключается, пока мы на другом
 const hookahs = [];                      // кальяны: { x, z, f, top, coal }
@@ -175,20 +197,120 @@ function noiseTex(base, spread = 18, size = 32, stains = 0) {
 }
 const mat = (color, opts = {}) => new THREE.MeshLambertMaterial({ color, flatShading: true, ...opts });
 const glow = color => new THREE.MeshBasicMaterial({ color });
+
+// ---- Текстуры: рисуются кодом в маленький canvas, пиксели остаются чёткими ----
+function canvasTex(size, draw) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  draw(c.getContext('2d'), size);
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+// закрасить прямоугольник цветом с шумом (k — яркость)
+function noiseRect(g, x0, y0, w, h, base, spread = 16, k = 1) {
+  const c = new THREE.Color(base);
+  for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) {
+    const n = k + (Math.random() - 0.5) * spread / 128;
+    g.fillStyle = `rgb(${c.r * 255 * n | 0},${c.g * 255 * n | 0},${c.b * 255 * n | 0})`; g.fillRect(x, y, 1, 1);
+  }
+}
+function stains(g, s, n, col = 'rgba(20,16,28,.22)') {
+  g.fillStyle = col;
+  for (let i = 0; i < n; i++) { g.beginPath(); g.ellipse(Math.random() * s, Math.random() * s, 1 + Math.random() * 6, 1 + Math.random() * 3, Math.random() * 3, 0, 7); g.fill(); }
+}
+function crack(g, s, col = 'rgba(15,12,20,.7)') {
+  let x = Math.random() * s, y = Math.random() * s; g.fillStyle = col;
+  for (let i = 0; i < 14; i++) { g.fillRect(x | 0, y | 0, 1, 1); x += (Math.random() - 0.3) * 2.5; y += Math.random() * 2; }
+}
+const TEX = {
+  // шлакоблоки с раствором, пятнами и трещинами
+  blocks: canvasTex(64, (g, s) => {
+    for (let r = 0; r < 4; r++) for (let b = -1; b < 2; b++) {
+      const x = b * 32 + (r % 2) * 16;
+      noiseRect(g, Math.max(0, x), r * 16, Math.min(32, 64 - x, x + 32), 16, '#5a5670', 22, 0.88 + Math.random() * 0.2);
+    }
+    g.fillStyle = '#3a3648';
+    for (let r = 0; r < 4; r++) { g.fillRect(0, r * 16 + 15, s, 1); for (let b = 0; b < 3; b++) g.fillRect((b * 32 + (r % 2) * 16) % s, r * 16, 1, 15); }
+    stains(g, s, 10); for (let i = 0; i < 3; i++) crack(g, s);
+    g.fillStyle = 'rgba(20,16,28,.25)'; g.fillRect(0, 56, s, 8);                       // грязь снизу
+  }),
+  // старая плитка на полу: швы, сколы, грязь
+  tiles: canvasTex(64, (g, s) => {
+    for (let ty = 0; ty < 4; ty++) for (let tx = 0; tx < 4; tx++)
+      noiseRect(g, tx * 16, ty * 16, 16, 16, (tx + ty) % 2 ? '#4a4658' : '#544f63', 18, 0.9 + Math.random() * 0.15);
+    g.fillStyle = '#2c2836'; for (let i = 0; i < 4; i++) { g.fillRect(i * 16, 0, 1, s); g.fillRect(0, i * 16, s, 1); }
+    stains(g, s, 14); for (let i = 0; i < 2; i++) crack(g, s);
+  }),
+  // доски с прожилками
+  wood: canvasTex(64, (g, s) => {
+    for (let p = 0; p < 4; p++) {
+      noiseRect(g, p * 16, 0, 16, s, '#6b3f24', 14, 0.85 + Math.random() * 0.25);
+      g.fillStyle = 'rgba(40,20,10,.35)';
+      for (let i = 0; i < 4; i++) { const x = p * 16 + 2 + Math.random() * 12; for (let y = 0; y < s; y++) g.fillRect(x + Math.sin(y / 6 + i) * 1.2 | 0, y, 1, 1); }
+      g.fillStyle = '#2e1a0e'; g.fillRect(p * 16, 0, 1, s); g.fillRect(p * 16 + 4 + (p * 7) % 8, 20 + p * 9, 2, 2);   // шов и сучок
+    }
+  }),
+  // картон: клейкая лента и надпись маркером
+  box: canvasTex(32, (g, s) => {
+    noiseRect(g, 0, 0, s, s, '#8a6a45', 16);
+    noiseRect(g, 13, 0, 6, s, '#b59a6a', 10);
+    g.fillStyle = '#2a1e14'; g.fillRect(4, 22, 7, 1); g.fillRect(4, 25, 5, 1); g.fillRect(22, 6, 6, 1);
+  }),
+  // ржавый металл
+  rust: canvasTex(32, (g, s) => { noiseRect(g, 0, 0, s, s, '#6e4a34', 30); stains(g, s, 8, 'rgba(150,70,30,.35)'); }),
+  // глиняная штукатурка
+  plaster: canvasTex(64, (g, s) => {
+    noiseRect(g, 0, 0, s, s, '#c4875a', 14);
+    stains(g, s, 12, 'rgba(255,220,180,.07)'); stains(g, s, 8, 'rgba(90,50,30,.1)');
+    for (let i = 0; i < 4; i++) crack(g, s, 'rgba(90,50,30,.55)');
+  }),
+  // песчаник слоями
+  rock: canvasTex(64, (g, s) => {
+    for (let y = 0; y < s; y += 4) noiseRect(g, 0, y, s, 4, ['#a8673f', '#b8784a', '#97593a', '#c08250'][(y / 4 + (Math.random() * 2 | 0)) % 4], 20);
+    for (let i = 0; i < 6; i++) crack(g, s, 'rgba(60,30,20,.5)');
+  }),
+  // доски террасы
+  deck: canvasTex(64, (g, s) => {
+    for (let r = 0; r < 8; r++) {
+      noiseRect(g, 0, r * 8, s, 8, '#8a5a36', 14, 0.85 + Math.random() * 0.25);
+      g.fillStyle = '#3a2416'; g.fillRect(0, r * 8 + 7, s, 1); g.fillRect((r * 23) % s, r * 8, 1, 7);
+      g.fillStyle = '#c9b48a'; g.fillRect((r * 13 + 5) % s, r * 8 + 3, 1, 1); g.fillRect((r * 13 + 37) % s, r * 8 + 3, 1, 1);   // гвозди
+    }
+  }),
+  // песок с рябью от ветра
+  sand: canvasTex(64, (g, s) => {
+    noiseRect(g, 0, 0, s, s, '#e0b080', 10);
+    g.fillStyle = 'rgba(150,100,60,.18)';
+    for (let i = 0; i < 9; i++) for (let x = 0; x < s; x++) g.fillRect(x, (i * 7 + Math.sin(x / 5 + i) * 2 + s) % s | 0, 1, 1);
+  }),
+  metal: canvasTex(32, (g, s) => { noiseRect(g, 0, 0, s, s, '#3a3640', 10); g.fillStyle = '#55505e'; for (const [x, y] of [[2, 2], [29, 2], [2, 29], [29, 29]]) g.fillRect(x, y, 1, 1); }),
+};
+// tile — сколько метров занимает текстура: тогда на большой стене она повторяется, а не растягивается
+const texMat = (map, tile) => { const m = new THREE.MeshLambertMaterial({ map }); m.userData.tile = tile; return m; };
 const M = {
-  concrete: new THREE.MeshLambertMaterial({ map: noiseTex('#5a5670', 30, 32, 6) }),
-  wood:     new THREE.MeshLambertMaterial({ map: noiseTex('#6b3f24', 30) }),
-  rust:     mat('#6e4a34'),
-  iron:     mat('#3a3640'),
+  concrete: texMat(TEX.blocks, 1.6),
+  wood:     texMat(TEX.wood, 1.2),
+  rust:     texMat(TEX.rust, 1),
+  iron:     texMat(TEX.metal, 1),
   chrome:   mat('#C9D3E0'),
   beige:    mat('#cfc6a8'),
   dark:     mat('#24202c'),
-  box:      new THREE.MeshLambertMaterial({ map: noiseTex('#8a6a45', 30) }),
+  box:      new THREE.MeshLambertMaterial({ map: TEX.box }),
 };
+// Растянуть UV под размер (метры / tile)
+function scaleUV(geo, sx, sy) {
+  const uv = geo.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * sx, uv.getY(i) * sy);
+}
+function worldUVBox(geo, w, h, d, tile) {
+  const uv = geo.attributes.uv, span = [[d, h], [d, h], [w, d], [w, d], [w, h], [w, h]];   // грани +x −x +y −y +z −z
+  for (let i = 0; i < uv.count; i++) { const [a, b] = span[i >> 2]; uv.setXY(i, uv.getX(i) * a / tile, uv.getY(i) * b / tile); }
+}
 
 // Помощник: коробка. collide = нельзя пройти насквозь
 function box(w, h, d, x, y, z, material, collide = false) {
-  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+  const geo = new THREE.BoxGeometry(w, h, d);
+  if (material.userData?.tile) worldUVBox(geo, w, h, d, material.userData.tile);
+  const m = new THREE.Mesh(geo, material);
   m.position.set(x, y + h / 2, z); scene.add(m);
   if (collide) obstacles.push({ x1: x - w / 2, x2: x + w / 2, z1: z - d / 2, z2: z + d / 2, f: BUILD_FLOOR });
   return m;
@@ -279,18 +401,25 @@ function slotScreenTex(i) {
 }
 function buildClub() {
   // Пол с пятнами, стены, потолок
-  const floorTex = noiseTex('#4a4658', 26, 64, 40); floorTex.repeat.set(4, 3);
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.x * 2, ROOM.z * 2),
-    new THREE.MeshLambertMaterial({ map: floorTex }));
+  const floorGeo = new THREE.PlaneGeometry(ROOM.x * 2, ROOM.z * 2); scaleUV(floorGeo, ROOM.x, ROOM.z);   // плитка 2×2 м
+  const floor = new THREE.Mesh(floorGeo, new THREE.MeshLambertMaterial({ map: TEX.tiles }));
   floor.rotation.x = -Math.PI / 2; scene.add(floor);
   box(ROOM.x * 2, ROOM.h, 0.5, 0, 0, -ROOM.z - 0.25, M.concrete);                // дальняя стена
   box(0.5, ROOM.h, ROOM.z * 2, -ROOM.x - 0.25, 0, 0, M.concrete);                // левая
   box(0.5, ROOM.h, ROOM.z * 2,  ROOM.x + 0.25, 0, 0, M.concrete);                // правая
   box(ROOM.x * 2, ROOM.h, 0.5, 0, 0, ROOM.z + 0.25, M.concrete);                 // передняя (камера крутится — видно)
-  box(ROOM.x * 2, 0.3, ROOM.z * 2, 0, ROOM.h, 0, M.dark);                        // потолок
-  for (let z = -6; z <= 6; z += 4) box(ROOM.x * 2, 0.4, 0.5, 0, ROOM.h - 0.4, z, M.iron); // балки
+  // потолок с проёмом над лестницей (x 3…5.4, z −6…−1)
+  const ceil = mat('#24202c');
+  box(15, 0.3, 16, -4.5, ROOM.h, 0, ceil); box(6.6, 0.3, 16, 8.7, ROOM.h, 0, ceil);
+  box(2.4, 0.3, 9, 4.2, ROOM.h, 3.5, ceil); box(2.4, 0.3, 2, 4.2, ROOM.h, -7, ceil);
+  for (let z = -6; z <= 6; z += 4) {                                               // балки (над лестницей — с разрывом)
+    if (z > -7 && z < 0) { box(15, 0.4, 0.5, -4.5, ROOM.h - 0.4, z, M.iron); box(6.6, 0.4, 0.5, 8.7, ROOM.h - 0.4, z, M.iron); }
+    else box(ROOM.x * 2, 0.4, 0.5, 0, ROOM.h - 0.4, z, M.iron);
+  }
   cyl(0.25, ROOM.x * 2, 0, ROOM.h - 0.8, -7, M.iron, 8, Math.PI / 2);            // трубы
-  cyl(0.18, ROOM.z * 2, 3, ROOM.h - 0.6, 0, M.iron, 8, 0, Math.PI / 2);
+  cyl(0.18, ROOM.z * 2, 2.4, ROOM.h - 0.6, 0, M.iron, 8, 0, Math.PI / 2);
+  cyl(0.06, ROOM.z * 2, -11.8, 3.9, 0, M.dark, 4, 0, Math.PI / 2);               // кабели по стенам
+  cyl(0.06, ROOM.x * 2, 0, 4.1, -7.85, M.dark, 4, Math.PI / 2);
 
   // ----- КАЧАЛКА (слева), холодный свет -----
   box(0.1, 2.5, 5, -ROOM.x + 0.05, 1, -3, mat('#7d86a8', { emissive: '#1a1f33' })); // треснувшее зеркало
@@ -348,10 +477,16 @@ function buildClub() {
   light('#FF2E9A', -0.5, 3.6, -6.8, 25, 9);
 
   // ----- ЛЕСТНИЦА наверх (справа от бара) -----
-  for (let i = 0; i < 7; i++) box(2, 0.5 * (i + 1), 0.5, 4.2, 0, -4.75 - i * 0.5, M.concrete);
-  obstacles.push({ x1: 3.2, x2: 5.2, z1: -8, z2: -4.5 });
-  box(0.3, ROOM.h, 4, 3, 0, -6, M.concrete); box(0.3, ROOM.h, 4, 5.4, 0, -6, M.concrete);
-  light('#FF8A2B', 4.2, 4, -7.5, 12, 6);
+  // ступени: просто идёшь вверх — и ты на втором этаже
+  const STEPS = 11, stepD = (STAIR.zLow - STAIR.zTop) / STEPS;
+  for (let i = 0; i < STEPS; i++) box(2.4, Y2 * (i + 1) / STEPS, stepD, 4.2, 0, STAIR.zLow - (i + 0.5) * stepD, M.concrete);
+  box(2.4, ROOM.h, 2, 4.2, 0, -7, M.concrete, true);                               // площадка наверху
+  for (const x of [2.85, 5.55]) box(0.3, ROOM.h, 7, x, 0, -4.5, M.concrete, true);  // стенки лестничного пролёта
+  for (const x of [3.05, 5.35]) {                                                     // поручни вдоль ступеней
+    const r = box(0.06, 0.06, Math.hypot(5, Y2), x, 0, -3.5, M.chrome);
+    r.position.y = Y2 / 2 + 0.9; r.rotation.x = Math.atan2(Y2, 5);
+  }
+  light('#FF8A2B', 4.2, 3.6, -2, 12, 7);
 
   // ----- ПК-КЛУБ (справа), зелёное свечение -----
   box(2, 0.1, 12, 10.6, 1, -1, M.wood); box(2, 1, 0.2, 10.6, 0, -7, M.wood);
@@ -397,7 +532,7 @@ function buildClub() {
   }
   const can = cyl(0.12, 0.35, 8, 0.17, 4.5, mat('#E3262B'), 8);
 
-  // ----- ЛАУНЖ С КАЛЬЯНАМИ (передний левый угол): F у кальяна — затяжка -----
+  // ----- ЛАУНЖ С КАЛЬЯНАМИ (передний левый угол): F у кальяна — выбор забивки -----
   const velvet = mat('#5a1f6e'), velvetDark = mat('#3e1450');
   const rug = new THREE.Mesh(new THREE.PlaneGeometry(5.6, 4.6), new THREE.MeshLambertMaterial({ map: rugTex() }));
   rug.rotation.x = -Math.PI / 2; rug.position.set(-9, 0.015, 5.6); scene.add(rug);
@@ -429,6 +564,29 @@ function buildClub() {
   light('#B44CFF', -10.5, 3.2, 5.5, 28, 10);
   light('#FF9A3C', -9, 3.2, 5.4, 18, 7);
 
+  // ----- Мелочи: постеры, огнетушитель, лужи -----
+  const poster = (lines, bg, fg, accent, w, h, x, y, z, ry) => {
+    const t = canvasTex(64, (g, s) => {
+      noiseRect(g, 0, 0, s, s, bg, 14);
+      g.fillStyle = accent; g.fillRect(3, 3, s - 6, 2); g.fillRect(3, s - 5, s - 6, 2);
+      g.fillStyle = fg; g.textAlign = 'center';
+      lines.forEach(([txt, size, yy]) => { g.font = `bold ${size}px Impact, sans-serif`; g.fillText(txt, 32, yy); });
+      g.fillStyle = 'rgba(255,255,255,.12)'; g.fillRect(0, 0, s, 1); g.fillRect(50, 0, 1, s);   // сгиб и потёртость
+    });
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshLambertMaterial({ map: t }));
+    m.position.set(x, y, z); m.rotation.y = ry; scene.add(m);
+  };
+  poster([['NGA', 22, 26], ['CUP', 16, 42], ['2006', 10, 56]], '#2a1640', '#ff7cc4', '#2EE6FF', 1.1, 1.1, -11.95, 2.4, 0.4, Math.PI / 2);
+  poster([['ХРЮК', 16, 22], ['РАННЕР', 13, 38], ['ИГРАЙ!', 9, 54]], '#0a160c', '#7CFF5B', '#FF9BB5', 1, 1, 9.2, 3.1, -7.96, 0);
+  poster([['КАЛЬЯН', 14, 24], ['24/7', 18, 46]], '#3a1020', '#ffb347', '#B44CFF', 1, 1, -5.6, 2.5, 7.96, Math.PI);
+  poster([['НЕ', 14, 22], ['КУРИТЬ', 12, 38], ['(шутка)', 8, 54]], '#d8d4c8', '#c0102a', '#c0102a', 0.7, 0.7, -2.2, 2.2, 7.96, Math.PI);
+  cyl(0.15, 0.6, 2.4, 0.3, -0.8, mat('#c0102a'), 8); cyl(0.05, 0.15, 2.4, 0.67, -0.8, M.dark, 6);   // огнетушитель
+  const puddle = new THREE.MeshPhongMaterial({ color: '#15121c', shininess: 40, specular: '#3a3550', transparent: true, opacity: 0.75 });
+  for (const [x, z, sx, sz] of [[-2.5, 0.5, 1.6, 0.9], [6.5, 2.5, 1.1, 0.7], [-4.8, -1.5, 0.9, 0.6]]) {
+    const pd = new THREE.Mesh(new THREE.CircleGeometry(1, 10), puddle);
+    pd.rotation.x = -Math.PI / 2; pd.scale.set(sx, sz, 1); pd.position.set(x, 0.012, z); scene.add(pd);
+  }
+
   ambient = new THREE.AmbientLight('#7a6f9a', 1.8); scene.add(ambient);
   hemi = new THREE.HemisphereLight('#C9D3E0', '#1A1424', 0.9); scene.add(hemi);
 }
@@ -436,23 +594,8 @@ buildClub();
 
 // ---------------------------------------------------------------------
 //  ВТОРОЙ ЭТАЖ: домик и терраса на краю скалы, внизу пустыня.
-//  Стоит прямо на потолке подвала (Y2). Лестница из подвала — F у ступенек.
+//  Стоит прямо на потолке подвала (Y2). Из подвала — просто подняться по лестнице.
 // ---------------------------------------------------------------------
-function planksTex() {
-  const c = document.createElement('canvas'); c.width = c.height = 32;
-  const g = c.getContext('2d'), base = new THREE.Color('#8a5a36');
-  for (let row = 0; row < 4; row++) {
-    const k = 0.85 + Math.random() * 0.3;
-    for (let y = 0; y < 8; y++) for (let x = 0; x < 32; x++) {
-      const n = k + (Math.random() - 0.5) * 0.12;
-      g.fillStyle = `rgb(${base.r * 255 * n},${base.g * 255 * n},${base.b * 255 * n})`; g.fillRect(x, row * 8 + y, 1, 1);
-    }
-    g.fillStyle = '#3a2416'; g.fillRect(0, row * 8 + 7, 32, 1); g.fillRect((row * 11) % 32, row * 8, 1, 7);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.magFilter = THREE.NearestFilter; t.wrapS = t.wrapT = THREE.RepeatWrapping; t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
 function stripesTex(a, b) {
   const c = document.createElement('canvas'); c.width = 16; c.height = 2;
   const g = c.getContext('2d');
@@ -464,15 +607,18 @@ const bulbMat = new THREE.MeshBasicMaterial({ color: '#ffd27a' });   // ламп
 const terraceLights = [];
 function buildUpstairs() {
   BUILD_FLOOR = 1;
-  const adobe = new THREE.MeshLambertMaterial({ map: noiseTex('#c4875a', 22, 32, 5) });
+  const adobe = texMat(TEX.plaster, 2.5);
   const rail = mat('#4a2c1a'), beam = mat('#6b4426');
-  const rock = new THREE.MeshLambertMaterial({ map: noiseTex('#a8673f', 30, 32, 8) });
-  rock.map.repeat.set(5, 5);
+  const rock = texMat(TEX.rock, 4);
 
   // Настил на весь этаж и террасу
-  const deckTex = planksTex(); deckTex.repeat.set(12, 10);
-  const deck = new THREE.Mesh(new THREE.PlaneGeometry(24, 20.5), new THREE.MeshLambertMaterial({ map: deckTex }));
-  deck.rotation.x = -Math.PI / 2; deck.position.set(0, Y2 + 0.01, 2.25); scene.add(deck);
+  // (кусками — с проёмом под лестницу x 3…5.4, z −6…−1)
+  const deckMat = new THREE.MeshLambertMaterial({ map: TEX.deck });
+  for (const [x1, x2, z1, z2] of [[-12, STAIR.x1, -8, 12.5], [STAIR.x2, 12, -8, 12.5], [STAIR.x1, STAIR.x2, STAIR.zLow, 12.5], [STAIR.x1, STAIR.x2, -8, STAIR.zTop]]) {
+    const geo = new THREE.PlaneGeometry(x2 - x1, z2 - z1); scaleUV(geo, (x2 - x1) / 2, (z2 - z1) / 2);
+    const deck = new THREE.Mesh(geo, deckMat);
+    deck.rotation.x = -Math.PI / 2; deck.position.set((x1 + x2) / 2, Y2 + 0.01, (z1 + z2) / 2); scene.add(deck);
+  }
   box(24.4, 0.35, 4.7, 0, Y2 - 0.34, 10.3, beam);                                    // край террасы
 
   // Скала, на которой всё стоит: большой массив + торчащие глыбы
@@ -498,9 +644,9 @@ function buildUpstairs() {
   for (const x of [-11.9, -6, 0, 6, 11.9]) box(0.3, 3.6, 0.3, x, Y2, 5, beam, true);
 
   // Проём лестницы в подвал
-  box(2, 0.02, 3.5, 4.2, Y2, -6.25, glow('#07050a'));
-  for (const x of [3.15, 5.25]) box(0.1, 1, 3.5, x, Y2, -6.25, rail);
-  obstacles.push({ x1: 3.1, x2: 5.3, z1: -8, z2: -4.5, f: 1 });
+  for (const x of [STAIR.x1 - 0.05, STAIR.x2 + 0.05]) box(0.1, 1, STAIR.zLow - STAIR.zTop, x, Y2, (STAIR.zLow + STAIR.zTop) / 2, rail, true);
+  box(STAIR.x2 - STAIR.x1 + 0.2, 1, 0.1, 4.2, Y2, STAIR.zLow + 0.05, rail, true);   // перила с ближней стороны
+  light('#ffb36b', 4.2, Y2 - 1.2, -3.5, 8, 5);                                       // свет в пролёте
   const down = neonSign('↓ ПОДВАЛ', '#FF8A2B', '#ffd0a0', 1.8, 0.45);
   down.position.set(4.2, Y2 + 2.6, -7.97); scene.add(down);
 
@@ -535,7 +681,7 @@ function buildUpstairs() {
   for (const x of [-8.6, -6.4]) {
     box(0.8, 0.35, 2, x, Y2, 9.2, mat('#e8e0cc'), true);
     box(0.7, 0.08, 1.4, x, Y2 + 0.35, 9.5, mat('#2EE6FF'));
-    const back = box(0.7, 0.1, 0.9, x, Y2 + 0.55, 8.15, mat('#2EE6FF')); back.rotation.x = -0.9;
+    const back = box(0.7, 0.1, 0.9, x, Y2 + 0.5, 8.45, mat('#2EE6FF')); back.rotation.x = 0.9;   // спинка приподнята к дому
   }
   cyl(0.05, 2.7, -7.5, Y2 + 1.35, 7.6, M.chrome, 6); obstacles.push({ x1: -7.65, x2: -7.35, z1: 7.45, z2: 7.75, f: 1 });
   const umb = new THREE.Mesh(new THREE.ConeGeometry(1.9, 0.7, 8, 1, true),
@@ -582,6 +728,12 @@ function buildUpstairs() {
   BUILD_FLOOR = 0;
 }
 buildUpstairs();
+// Всё на втором этаже отбрасывает и принимает тени от солнца
+scene.traverse(o => {
+  if (!o.isMesh || o.material.isMeshBasicMaterial) return;
+  const p = o.getWorldPosition(new THREE.Vector3());
+  if (p.y > Y2 - 0.5 && Math.abs(p.x) < 17 && p.z > -9 && p.z < 14) o.castShadow = o.receiveShadow = true;
+});
 
 // ---------------------------------------------------------------------
 //  ПУСТЫНЯ: дюны, столовые горы, кактусы, небо со сменой суток,
@@ -596,14 +748,16 @@ const rnd = (a, b) => a + Math.random() * (b - a);
 {
   const geo = new THREE.PlaneGeometry(1400, 1400, 90, 90); geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position, cols = [];
-  const sandA = new THREE.Color('#d9a066'), sandB = new THREE.Color('#b9804c'), tmp = new THREE.Color();
+  scaleUV(geo, 350, 350);                                                          // рябь песка — плитка 4 м
+  const sandA = new THREE.Color('#fff1dc'), sandB = new THREE.Color('#c99a74'), tmp = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
     const y = groundH(pos.getX(i), pos.getZ(i)); pos.setY(i, y);
     tmp.copy(sandB).lerp(sandA, Math.min(1, Math.max(0, (y - GROUND_Y + 2.5) / 5 + (Math.random() - 0.5) * 0.25)));
     cols.push(tmp.r, tmp.g, tmp.b);
   }
   geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3)); geo.computeVertexNormals();
-  scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
+  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, map: TEX.sand }));
+  ground.receiveShadow = true; scene.add(ground);
   // Столовые горы на горизонте
   for (let i = 0; i < 9; i++) {
     const a = rnd(-1.3, 1.3) + (i % 3 === 0 ? Math.PI : 0), d = rnd(260, 520), r = rnd(30, 75), h = rnd(25, 70);
@@ -644,6 +798,23 @@ const stars = (() => {
   scene.add(s); return s;
 })();
 const sunLight = new THREE.DirectionalLight('#fff4dd', 2.5), moonLight = new THREE.DirectionalLight('#8ea0ff', 0.4);
+sunLight.target.position.set(0, Y2, 3); scene.add(sunLight.target);
+sunLight.castShadow = true; sunLight.shadow.mapSize.set(1024, 1024); sunLight.shadow.bias = -0.002;
+Object.assign(sunLight.shadow.camera, { left: -18, right: 18, top: 18, bottom: -18, near: 1, far: 300 });
+// Облака: плоские low-poly клочья, медленно плывут по ветру
+const clouds = [];
+{
+  const cm = new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.8, fog: false, depthWrite: false });
+  for (let i = 0; i < 14; i++) {
+    const g = new THREE.Group();
+    for (let j = 0; j < 4 + (i % 3); j++) {
+      const b = new THREE.Mesh(new THREE.IcosahedronGeometry(1, 0), cm);
+      b.scale.set(rnd(18, 34), rnd(5, 9), rnd(12, 22)); b.position.set(j * 20 - 30 + rnd(-6, 6), rnd(-3, 3), rnd(-8, 8)); g.add(b);
+    }
+    g.position.set(rnd(-600, 600), rnd(140, 220), rnd(80, 650)); scene.add(g); clouds.push(g);
+  }
+  clouds.mat = cm;
+}
 scene.add(sunLight, moonLight);
 
 // Сутки: один круг за 10 минут, время у всех игроков общее (по часам)
@@ -673,7 +844,9 @@ function updateSky() {
   sunMesh.position.copy(camera.position).addScaledVector(sunDir, 850); sunMesh.visible = e > -0.12;
   sunMesh.material.color.setRGB(1, 0.7 + 0.25 * day, 0.4 + 0.45 * day);
   moonMesh.position.copy(camera.position).addScaledVector(sunDir, -850); moonMesh.visible = e < 0.12;
-  sunLight.position.copy(sunDir).multiplyScalar(100); sunLight.intensity = 2.6 * day;
+  sunLight.position.copy(sunLight.target.position).addScaledVector(sunDir, 120); sunLight.intensity = 2.6 * day;
+  clouds.mat.color.copy(skyHor).lerp(new THREE.Color('#ffffff'), 0.3 + 0.6 * day).lerp(SKY.glow, dusk * 0.4);
+  clouds.mat.opacity = 0.35 + 0.5 * day;
   sunLight.color.setRGB(1, 0.75 + 0.25 * (1 - dusk), 0.55 + 0.45 * (1 - dusk));
   moonLight.position.copy(sunDir).multiplyScalar(-100); moonLight.intensity = 0.6 * (1 - day);
   ambient.color.copy(SKY.ambN).lerp(SKY.ambD, day); ambient.intensity = 0.7 + 0.6 * day;
@@ -685,7 +858,7 @@ function updateSky() {
 // Подвал ↔ терраса: свой свет, туман и фон
 let envUp = null;
 function updateEnv() {
-  const up = current !== null && player.floor === 1;
+  const up = current !== null && standY(player.floor, player.x, player.z) > 2.8;   // на лестнице свет меняется на полпути
   if (up !== envUp) {
     envUp = up;
     lightsByFloor[0].forEach(l => l.visible = !up); lightsByFloor[1].forEach(l => l.visible = up);
@@ -740,6 +913,10 @@ for (let i = 0; i < 2; i++) {
 }
 function updateDesert(dt, t) {
   const gust = 1 + Math.sin(t * 0.3) * 0.4;
+  for (const c of clouds) { c.position.x += dt * 3 * gust; if (c.position.x > 700) c.position.x = -700; }
+  // персы тоже отбрасывают тени (модели грузятся позже — проверяем раз в полсекунды)
+  if ((t % 0.5) < dt) for (const r of [current !== null ? players[current] : null, ...[...remotes.values()].map(r => r.model)])
+    r?.root.traverse(o => { if (o.isMesh) o.castShadow = true; });
   for (const w of tumbles) {
     w.x += w.speed * gust * dt;
     const hop = Math.abs(Math.sin(t * w.speed * 0.35 + w.ph)) * 1.1 * w.r;
@@ -1198,31 +1375,69 @@ let makeCharacter = function (c) {
 // Облачка пара для Эдика
 const puffs = [];
 const puffMat = new THREE.MeshLambertMaterial({ color: '#C9D3E0', transparent: true, opacity: 0.5, flatShading: true });
-function spawnPuff(x, y, z, size = 0.15, v = { x: 0, y: 0.5, z: 0 }, max = 2.5, grow = 1.5) {
-  const m = new THREE.Mesh(new THREE.IcosahedronGeometry(size, 0), puffMat.clone());
-  m.position.set(x + (Math.random() - 0.5) * 0.2, y, z); scene.add(m);
-  puffs.push({ m, life: 0, v, max, grow });
+const PUFF_GEO = new THREE.IcosahedronGeometry(1, 0);
+// color — цвет дыма (вкус забивки), delay — через сколько секунд клуб появится, jitter — разброс по X
+function spawnPuff(x, y, z, size = 0.15, v = { x: 0, y: 0.5, z: 0 }, max = 2.5, grow = 1.5, color = null, delay = 0, jitter = 0.2, lift = 0.25) {
+  const mat = puffMat.clone();
+  if (color) { mat.color.set(color); mat.emissive.set(color).multiplyScalar(0.45); }
+  const m = new THREE.Mesh(PUFF_GEO, mat);
+  m.position.set(x + (Math.random() - 0.5) * jitter, y, z); m.scale.setScalar(size); m.visible = delay <= 0; scene.add(m);
+  puffs.push({ m, life: -delay, v, max, grow, size, op: color ? 0.6 : 0.5, lift });
 }
 function updatePuffs(dt) {
   for (let i = puffs.length - 1; i >= 0; i--) {
     const p = puffs[i]; p.life += dt;
+    if (p.life < 0) continue;                                     // ещё не появился
+    p.m.visible = true;
     const drag = Math.exp(-dt * 1.2);                             // дым тормозит, но всё равно ползёт вверх
-    p.v.x *= drag; p.v.z *= drag; p.v.y = p.v.y * drag + dt * 0.25;
+    p.v.x *= drag; p.v.z *= drag; p.v.y = p.v.y * drag + dt * p.lift;
     p.m.position.x += p.v.x * dt; p.m.position.y += p.v.y * dt; p.m.position.z += p.v.z * dt;
-    p.m.scale.setScalar(1 + p.life * p.grow);
-    p.m.material.opacity = 0.5 * Math.max(0, 1 - p.life / p.max);
-    if (p.life > p.max) { scene.remove(p.m); puffs.splice(i, 1); }
+    p.m.scale.setScalar(p.size * (1 + p.life * p.grow));
+    p.m.material.opacity = p.op * Math.max(0, 1 - p.life / p.max);
+    if (p.life > p.max) { scene.remove(p.m); p.m.material.dispose(); puffs.splice(i, 1); }
   }
 }
-// Огромное облако кальяна: десятки клубов из рта, летят вперёд-вверх и медленно расплываются
-function hugeCloud(head) {
+// Огромное облако кальяна: десятки клубов из рта, летят вперёд-вверх и медленно расплываются.
+// color — цвет вкуса, k — крепость (больше клубов, крупнее и дальше)
+function hugeCloud(head, color = null, k = 1) {
   const o = new THREE.Vector3(0, 0.15, 0.8); head.localToWorld(o);
   const f = new THREE.Vector3(0, 0.15, 2); head.localToWorld(f); f.sub(o).normalize();
-  for (let i = 0; i < 55; i++) {
-    const sp = 1.5 + Math.random() * 3.5, a = (Math.random() - 0.5) * 1.6;
+  for (let i = 0; i < Math.round(55 * k); i++) {
+    const sp = (1.5 + Math.random() * 3.5) * (0.7 + 0.3 * k), a = (Math.random() - 0.5) * 1.6;
     const dir = f.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), a);
-    spawnPuff(o.x, o.y, o.z, 0.18 + Math.random() * 0.3,
-      { x: dir.x * sp, y: 0.3 + Math.random() * 1.4, z: dir.z * sp }, 4 + Math.random() * 3, 2 + Math.random() * 1.5);
+    spawnPuff(o.x, o.y, o.z, (0.18 + Math.random() * 0.3) * (0.8 + 0.2 * k),
+      { x: dir.x * sp, y: 0.3 + Math.random() * 1.4, z: dir.z * sp }, 4 + Math.random() * 3, 2 + Math.random() * 1.5, color);
+  }
+}
+// Логотип NGA (обведён по картинке 850×850: x 80…765, y 332…520) — три фигуры
+const LOGO = [
+  [[115, 365], [240, 333], [365, 507], [272, 507], [205, 415], [180, 492], [80, 520], [123, 388]],
+  [[300, 385], [338, 332], [500, 332], [530, 375], [365, 377], [428, 463], [455, 463], [478, 428], [440, 428], [425, 403], [570, 403], [512, 507], [387, 507]],
+  [[537, 352], [550, 332], [620, 332], [765, 520], [648, 507], [627, 478], [555, 478], [570, 462], [603, 447], [580, 415]],
+];
+let logoPts = null;
+function logoPoints() {                                           // точки внутри логотипа: u −0.5…0.5, v 0…1
+  if (logoPts) return logoPts;
+  const W = 137, H = 38, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.fillStyle = '#fff';
+  for (const poly of LOGO) {
+    g.beginPath(); poly.forEach(([x, y], i) => g[i ? 'lineTo' : 'moveTo']((x - 80) * W / 685, (y - 332) * H / 188)); g.closePath(); g.fill();
+  }
+  const d = g.getImageData(0, 0, W, H).data; logoPts = [];
+  for (let y = 1; y < H; y += 3) for (let x = 1; x < W; x += 3) if (d[(y * W + x) * 4 + 3] > 128) logoPts.push([x / W - 0.5, 1 - y / H]);
+  return logoPts;
+}
+// Дым-логотип: струя изо рта, а впереди из клубов проявляется «NGA» (всегда читается — повёрнут к камере)
+function logoCloud(head, color, k = 1) {
+  const o = new THREE.Vector3(0, 0.15, 0.8); head.localToWorld(o);
+  const f = new THREE.Vector3(0, 0.15, 2); head.localToWorld(f); f.sub(o).setY(0).normalize();
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion).setY(0).normalize();
+  const W = 3.4 * Math.sqrt(k), H = W * 38 / 137, c = o.clone().addScaledVector(f, 2.6 + k * 0.6); c.y += 0.45;
+  for (let i = 0; i < 18; i++)                                    // струя к логотипу
+    spawnPuff(o.x, o.y, o.z, 0.12, { x: f.x * (2 + Math.random() * 2), y: 0.4 + Math.random() * 0.5, z: f.z * (2 + Math.random() * 2) }, 1.6, 1.6, color, i * 0.02);
+  for (const [u, v] of logoPoints()) {
+    const p = c.clone().addScaledVector(right, u * W); p.y += v * H;
+    spawnPuff(p.x, p.y, p.z, 0.09 * Math.sqrt(k), { x: f.x * 0.12, y: 0.06, z: f.z * 0.12 }, 4 + k * 1.5, 0.22, color, 0.25 + (u + 0.5) * 0.6, 0, 0.03);
   }
 }
 
@@ -1331,7 +1546,7 @@ function startGame(i) {
   players.forEach(p => scene.remove(p.root));
   scene.add(players[i].root);
   Object.assign(player, { x: 0, z: 2, angle: 0, walk: 0, jumpY: 0, vy: 0, floor: 0 });
-  camYaw = 0; camDist = CAM_DIST;
+  camDist = CAM_DIST; setCamYaw(0);
   camLook.set(0, 1.6, 0.5);
   camPos.set(0, 3.9, 7.4);
   selectEl.classList.add('hidden');
@@ -1341,7 +1556,7 @@ function backToSelect() {
   players.forEach(p => scene.remove(p.root));
   selectEl.classList.remove('hidden');
   exitPC();
-  player.floor = 0; hookahPuff = false;
+  player.floor = 0; smoke = null; closeHookahMenu();
   promptEl.classList.add('hidden'); drinkTime = 0; buzzTime = 0; soap = 0;
   renderer.domElement.style.filter = '';
 }
@@ -1353,7 +1568,7 @@ const USE_LABEL = { edik: 'затяжка', danya: 'глоток', yarik: 'ка�
 const USE_TEXT  = { edik: '* ПФФФ... *', danya: '* ПШ-Ш-Ш, ГЛЫК *', yarik: '* ВДЫ-Ы-Ы-ЫХ... *' };
 let useTime = 0;
 addEventListener('mousedown', e => {
-  if (e.button === 0 && current !== null && !pcMode && !slotMode && useTime <= 0 && drinkTime <= 0) {
+  if (e.button === 0 && current !== null && !pcMode && !slotMode && !hmOpen && useTime <= 0 && drinkTime <= 0) {
     useTime = USE_DURATION;
     ({ edik: SFX.puff, danya: SFX.can, yarik: SFX.inhale })[CHARACTERS[current].id]();
   }
@@ -1368,6 +1583,16 @@ const promptEl = document.getElementById('prompt');
 const promptTextEl = document.getElementById('promptText');
 addEventListener('keydown', e => {
   if (slotMode) return;                                          // в слотах клавиши у мини-игры
+  if (hmOpen) {                                                  // меню забивки: цифра — вкус, стрелки — крепость
+    e.preventDefault();
+    if (e.repeat) return;                                        // зажатая F не закрывает меню сразу
+    const n = +e.code.replace(/^(Digit|Numpad)/, '');
+    if (/^(Digit|Numpad)[1-6]$/.test(e.code)) chooseFlavor(n - 1);
+    else if (e.code === 'ArrowLeft' || e.code === 'KeyA') { hmStrength = Math.max(0, hmStrength - 1); renderHookahMenu(); SFX.click(); }
+    else if (e.code === 'ArrowRight' || e.code === 'KeyD') { hmStrength = Math.min(2, hmStrength + 1); renderHookahMenu(); SFX.click(); }
+    else if (e.code === 'Escape' || e.code === 'KeyF') closeHookahMenu();
+    return;
+  }
   keys[e.code] = true;
   if (pcMode) {                                                   // за компом: управление миниигрой
     if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
@@ -1388,36 +1613,65 @@ addEventListener('keydown', e => {
   else if (e.code === 'Space' && !e.repeat && player.jumpY === 0 && drinkTime <= 0) { player.vy = JUMP_POWER; SFX.jump(); }
   else if (e.code === 'KeyF' && nearPC && drinkTime <= 0 && player.jumpY === 0) { enterPC(nearPC); SFX.click(); }
   else if (e.code === 'KeyF' && nearSlot && drinkTime <= 0 && player.jumpY === 0) { enterSlot(nearSlot); SFX.coin(); }
-  else if (e.code === 'KeyF' && nearStairs && !fading && drinkTime <= 0 && player.jumpY === 0) goFloor(player.floor ? 0 : 1);
-  else if (e.code === 'KeyF' && nearHookah && useTime <= 0 && drinkTime <= 0) { useTime = USE_DURATION; hookahPuff = true; SFX.inhale(); }
+  else if (e.code === 'KeyF' && nearHookah && useTime <= 0 && drinkTime <= 0 && !e.repeat) openHookahMenu();
   if (e.code.startsWith('Arrow') || e.code === 'Space') e.preventDefault();
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
 
-// Камера ходит за персом: Q/E или правая кнопка мыши — повернуть, колесо — ближе/дальше
+// Камера сама едет за персом: держится на «поводке» позади и плавно заходит за спину.
+// Мышь не нужна; Q/E — подвернуть вручную, если хочется.
 const CAM_DIST = 5.6;
-let camYaw = 0, camDist = CAM_DIST, camDrag = false, lastMouseX = 0, snapCam = false;
+let camYaw = 0, camDist = CAM_DIST, snapCam = false, camVX = 0, camVZ = CAM_DIST;
 const camFree = () => current !== null && !pcMode && !slotMode;
-renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
-addEventListener('mousedown', e => { if (e.button === 2 && camFree()) { camDrag = true; lastMouseX = e.clientX; } });
-addEventListener('mouseup', e => { if (e.button === 2) camDrag = false; });
-addEventListener('mousemove', e => {
-  if (camDrag && camFree()) camYaw -= (e.clientX - lastMouseX) * 0.008;
-  lastMouseX = e.clientX;
-});
-addEventListener('wheel', e => { if (camFree()) camDist = Math.max(3, Math.min(9, camDist + Math.sign(e.deltaY) * 0.6)); }, { passive: true });
+const wrapA = a => Math.atan2(Math.sin(a), Math.cos(a));
+function camFollow(dt) {
+  const vx = camVX - player.x, vz = camVZ - player.z;           // поводок: точка камеры тянется за персом
+  if (Math.hypot(vx, vz) > 0.01) camYaw = Math.atan2(vx, vz);
+  if (player.moving) {                                           // бежим вперёд/по диагонали — камера плавно заходит за спину
+    const d = wrapA(player.angle + Math.PI - camYaw);            // (вбок и на камеру — нет, иначе перс крутится на месте)
+    if (Math.abs(d) < 1) camYaw += d * Math.min(1, dt * 1.2);
+  }
+  camYaw += ((keys.KeyQ ? 1 : 0) - (keys.KeyE ? 1 : 0)) * dt * 2.2;
+  camVX = player.x + Math.sin(camYaw) * camDist; camVZ = player.z + Math.cos(camYaw) * camDist;
+}
+function setCamYaw(y) { camYaw = y; camVX = player.x + Math.sin(y) * camDist; camVZ = player.z + Math.cos(y) * camDist; }
 
-// Лестница: F у ступенек → затемнение → другой этаж
-let nearStairs = false, nearHookah = null, hookahPuff = false, fading = false;
-const fadeEl = document.getElementById('fade');
-function goFloor(f) {
-  fading = true; fadeEl.style.opacity = 1; SFX.step();
-  setTimeout(() => {
-    Object.assign(player, { floor: f, x: 4.2, z: -3.5, angle: 0, vy: 0, jumpY: 0 });
-    camYaw = f ? Math.PI : 0;            // наверху камера сразу смотрит на террасу и пустыню
-    snapCam = true;
-    fadeEl.style.opacity = 0; fading = false;
-  }, 380);
+// ---------------------------------------------------------------------
+//  КАЛЬЯН: F у кальяна → выбор забивки (вкус = цвет дыма, крепость = размер облака).
+//  Забивка от NGA дымит логотипом.
+// ---------------------------------------------------------------------
+const FLAVORS = [
+  { name: 'ДВОЙНОЕ ЯБЛОКО',  color: '#7CFF5B' },
+  { name: 'АРБУЗ-МЯТА',      color: '#FF4D6D' },
+  { name: 'ЧЕРНИКА',         color: '#7B6BFF' },
+  { name: 'МАНГО-МАРАКУЙЯ',  color: '#FFB347' },
+  { name: 'ЛЕДЯНАЯ МЯТА',    color: '#2EE6FF' },
+  { name: 'ЗАБИВКА ОТ NGA',  color: '#FF2E9A', nga: true },
+];
+const STRENGTHS = [{ name: 'ЛЁГКАЯ', k: 0.6 }, { name: 'СРЕДНЯЯ', k: 1 }, { name: 'КРЕПКАЯ', k: 1.7 }];
+let nearHookah = null, smoke = null, hmOpen = false, hmStrength = 1;   // smoke = { fl, st } — что сейчас курим
+const hmEl = document.getElementById('hookahMenu');
+function renderHookahMenu() {
+  document.getElementById('hmStrength').innerHTML = STRENGTHS.map((s, i) =>
+    `<span class="hm-st${i === hmStrength ? ' on' : ''}" data-st="${i}">${s.name}</span>`).join('');
+  document.getElementById('hmList').innerHTML = FLAVORS.map((f, i) =>
+    `<div class="hm-fl" data-fl="${i}" style="--c:${f.color}"><span class="hm-n">${i + 1}</span><span class="hm-dot"></span>${f.name}</div>`).join('');
+}
+function openHookahMenu() { hmOpen = true; renderHookahMenu(); hmEl.classList.remove('hidden'); for (const k in keys) keys[k] = false; SFX.click(); }
+function closeHookahMenu() { hmOpen = false; hmEl.classList.add('hidden'); }
+function chooseFlavor(i) {
+  closeHookahMenu();
+  smoke = { fl: i, st: hmStrength }; useTime = USE_DURATION; SFX.inhale();
+}
+hmEl.addEventListener('click', e => {
+  const st = e.target.closest('[data-st]'), fl = e.target.closest('[data-fl]');
+  if (st) { hmStrength = +st.dataset.st; renderHookahMenu(); SFX.click(); }
+  else if (fl) chooseFlavor(+fl.dataset.fl);
+});
+// Выдох: цветное облако; у забивки NGA — логотип из дыма
+function exhaleSmoke(head, fl, st) {
+  const F = FLAVORS[fl] || FLAVORS[0], k = (STRENGTHS[st] || STRENGTHS[1]).k;
+  if (F.nga) logoCloud(head, F.color, k); else hugeCloud(head, F.color, k);
 }
 
 // ---------------------------------------------------------------------
@@ -1463,11 +1717,9 @@ function update(dt, t) {
   if (keys.ArrowRight || keys.KeyD) ix += 1;
   if (keys.ArrowUp    || keys.KeyW) iz -= 1;
   if (keys.ArrowDown  || keys.KeyS) iz += 1;
-  if (camFree()) camYaw += ((keys.KeyQ ? 1 : 0) - (keys.KeyE ? 1 : 0)) * dt * 2.2;
   // «вперёд» — туда, куда смотрит камера
-  const cY = Math.cos(camYaw), sY = Math.sin(camYaw);
-  let dx = ix * cY + iz * sY, dz = -ix * sY + iz * cY;
-  if (drinkTime > 0 || pcMode || slotMode || fading) { dx = 0; dz = 0; }   // пока пьёт — стоит на месте
+  let dx = ix * Math.cos(camYaw) + iz * Math.sin(camYaw), dz = -ix * Math.sin(camYaw) + iz * Math.cos(camYaw);
+  if (drinkTime > 0 || pcMode || slotMode || hmOpen) { dx = 0; dz = 0; }   // пока пьёт или выбирает забивку — стоит
   const len = Math.hypot(dx, dz);
   player.moving = len > 0;
   if (player.moving) {
@@ -1481,6 +1733,12 @@ function update(dt, t) {
     player.angle += diff * Math.min(1, dt * 12);
   } else player.walk = 0;
   if (!pcMode) collide(player);
+  // Лестница: поднялся почти до верха — ты на втором этаже, спустился — в подвале
+  if (inStairs(player.x, player.z)) {
+    if (player.floor === 0 && player.z < STAIR.zTop + 0.5) player.floor = 1;
+    else if (player.floor === 1 && player.z > STAIR.zTop + 1.5) player.floor = 0;
+  }
+  if (camFree()) camFollow(dt);
 
   // Анимация: шаги руками-ногами, подпрыгивание; на месте — «дыхание»
   const w = player.walk * 11;
@@ -1488,7 +1746,8 @@ function update(dt, t) {
   const bob = player.moving ? Math.abs(Math.sin(w)) * 0.12 : 0;
   const breath = player.moving ? 1 : 1 + Math.sin(t * 2.5) * 0.015;
   const base = c.size * 0.85;
-  p.root.position.set(player.x, floorY(player.floor), player.z);
+  const groundY = standY(player.floor, player.x, player.z);
+  p.root.position.set(player.x, groundY, player.z);
   // Прыжок: летит вверх, гравитация тянет вниз
   if (player.vy !== 0 || player.jumpY > 0) {
     player.vy -= GRAVITY * dt;
@@ -1516,12 +1775,10 @@ function update(dt, t) {
   nearSlot = down && player.z < -5.2 && player.x > 5.5 && player.x < 9.2
     ? slots.reduce((a, b) => Math.abs(player.x - a.x) < Math.abs(player.x - b.x) ? a : b) : null;
   if (nearSlot && player.x < 8.9) nearPC = null;                // у автоматов — автоматы, а не комп
-  nearStairs = player.x > 3.25 && player.x < 5.15 && player.z < -3.75;   // у лестницы (внизу и наверху в одном месте)
   nearHookah = hookahs.find(h => h.f === player.floor && Math.hypot(h.x - player.x, h.z - player.z) < 1.7) || null;
-  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ'
-    : nearStairs ? (down ? 'НАВЕРХ, НА ТЕРРАСУ' : 'ВНИЗ, В ПОДВАЛ') : nearHookah ? 'ПОКУРИТЬ КАЛЬЯН' : 'ВЫПИТЬ ПИВА';
-  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot || nearStairs || nearHookah)
-    && drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode && !fading));
+  promptTextEl.textContent = nearPC ? 'ПОИГРАТЬ' : nearSlot ? 'ДИЗАЙН-СЛОТЫ' : nearHookah ? 'ЗАБИТЬ КАЛЬЯН' : 'ВЫПИТЬ ПИВА';
+  promptEl.classList.toggle('hidden', !((nearBar || nearPC || nearSlot || nearHookah)
+    && drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode && !hmOpen));
   p.mug.visible = drinkTime > 0;
   if (drinkTime > 0) {
     drinkTime -= dt;
@@ -1544,16 +1801,17 @@ function update(dt, t) {
     p.arms[0].rotation.x = -2.4 * lift;
     p.arms[0].rotation.z = 0.6 * lift;                          // к лицу, а не в сторону
     if (drinkTime <= 0) p.head.rotation.x = (c.id === 'danya' ? -0.3 : 0.1) * lift;
-    hint.textContent = hookahPuff ? '* БУЛЬК-БУЛЬК-БУЛЬК... *' : USE_TEXT[c.id];
+    hint.textContent = smoke ? `* БУЛЬК-БУЛЬК... ${FLAVORS[smoke.fl].name} *` : USE_TEXT[c.id];
     if (c.id === 'yarik') {                                       // Ярик: секунду тянет кальян, голова чуть назад
       p.head.rotation.x = -0.15 * Math.min(1, k * 3);
-      if (useTime <= 0) { hugeCloud(p.head); SFX.exhale(); p.head.rotation.x = 0; }
+      if (useTime <= 0 && !smoke) { hugeCloud(p.head); SFX.exhale(); p.head.rotation.x = 0; }
     }
-    if (hookahPuff && useTime <= 0) {                             // затяжка из кальяна в лаунже — облако у любого
-      if (c.id !== 'yarik') { hugeCloud(p.head); SFX.exhale(); }
-      hookahPuff = false;
+    const fromHookah = !!smoke;
+    if (smoke && useTime <= 0) {                                  // кальян: облако цвета забивки
+      exhaleSmoke(p.head, smoke.fl, smoke.st); SFX.exhale(); p.head.rotation.x = 0;
+      smoke = null;
     }
-    if (c.id === 'edik' && useTime <= 0) {                        // выдох — большое облако пара
+    if (c.id === 'edik' && useTime <= 0 && !fromHookah) {         // выдох — большое облако пара
       for (let i = 0; i < 6; i++) {
         const v = new THREE.Vector3((Math.random() - 0.5) * 0.4, 0.3 + Math.random() * 0.3, 0.6); p.head.localToWorld(v);
         spawnPuff(v.x, v.y, v.z);
@@ -1571,7 +1829,7 @@ function update(dt, t) {
     ? `blur(${2.5 * soap}px) saturate(${1 + 0.8 * soap}) hue-rotate(${Math.sin(t * 1.7) * 30 * soap}deg)`
     : '';
 
-  heroLight.position.set(player.x, floorY(player.floor) + 2.6, player.z + 1.2);
+  heroLight.position.set(player.x, groundY + 2.6, player.z + 1.2);
 
   // Садится за комп: подходит к стулу, ноги сгибаются, руки на клавиатуру
   if (pcMode) {
@@ -1614,9 +1872,12 @@ function update(dt, t) {
   } else {
     if (pcMode) hint.textContent = '* садится за комп *';
     // Камера сзади-сверху на расстоянии camDist, повёрнута на camYaw; не вылезает за стены
-    const by = floorY(player.floor);
+    const by = groundY, sY = Math.sin(camYaw), cY = Math.cos(camYaw);
     let cx = player.x + sY * camDist, cz = player.z + cY * camDist, cy = by + 1.4 + camDist * 0.36;
-    if (player.floor === 0) { cx = Math.max(-11.5, Math.min(11.5, cx)); cz = Math.max(-7.5, Math.min(7.5, cz)); }
+    if (player.floor === 0) {
+      cx = Math.max(-11.5, Math.min(11.5, cx)); cz = Math.max(-7.5, Math.min(7.5, cz));
+      if (!inStairs(cx, cz)) cy = Math.min(cy, ROOM.h - 0.5);   // под потолком (над лестницей — проём)
+    }
     else {
       cz = Math.max(-7.6, cz);
       if (cz < -1.8) { cx = Math.max(-11.6, Math.min(11.6, cx)); cy = Math.min(cy, by + 3.9); }   // в домике — под крышей
@@ -1633,7 +1894,7 @@ function update(dt, t) {
   }
 
   osdMode.textContent = 'PLAY ▶ ' + c.name;
-  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · Q/E, ПКМ — камера · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · J — эмоция · ESC — назад';
+  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · Q/E — камера · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · J — эмоция · ESC — назад';
 }
 
 // ---------------------------------------------------------------------
@@ -1695,10 +1956,10 @@ function netTick(t, dt) {
     c: current, x: r2(player.x), z: r2(player.z), a: r2(player.angle),
     vx: moving ? r2(velX) : 0, vz: moving ? r2(velZ) : 0, jt: jumpAt,
     e: emoteT > 0 ? emote : -1, m: moving ? 1 : 0, d: drinkTime > 0 ? 1 : 0, u: useTime > 0 ? 1 : 0, b: buzzTime > 0 ? 1 : 0, sit: pcMode ? 1 : 0,
-    f: player.floor, h: hookahPuff ? 1 : 0,
+    f: player.floor, h: smoke ? smoke.fl + 1 : 0, hs: smoke ? smoke.st : 0,
   };
   const p = netSent;
-  let need = !p || t - netSentAt > NET_BEAT || ['c', 'e', 'm', 'd', 'u', 'b', 'sit', 'jt', 'f', 'h'].some(k => p[k] !== s[k]);
+  let need = !p || t - netSentAt > NET_BEAT || ['c', 'e', 'm', 'd', 'u', 'b', 'sit', 'jt', 'f', 'h', 'hs'].some(k => p[k] !== s[k]);
   if (!need && s.c != null) {
     const age = t - netSentAt, px = p.x + p.vx * age, pz = p.z + p.vz * age;   // где перс у друга сейчас
     need = Math.hypot(px - s.x, pz - s.z) > 1 || Math.hypot(p.vx - s.vx, p.vz - s.vz) > 1.5 || (!s.m && Math.abs(p.a - s.a) > 0.6);
@@ -1719,7 +1980,7 @@ function updateRemotes(dt) {
     const s = r.s, m = r.model, k = Math.min(1, dt * 8);
     const age = Math.min(3, (now - r.seen) / 1000);  // доезжает по скорости, но не дальше 3 с
     const tx = s.x + (s.vx || 0) * age, tz = s.z + (s.vz || 0) * age;
-    if (r.f !== (s.f || 0)) { r.f = s.f || 0; r.x = tx; r.z = tz; }   // сменил этаж — сразу на месте, без проезда
+    r.f = s.f || 0;
     r.x += (tx - r.x) * k; r.z += (tz - r.z) * k;
     const da = s.a - r.angle; r.angle += Math.atan2(Math.sin(da), Math.cos(da)) * k;
     r.walk = s.m ? r.walk + dt : 0;
@@ -1727,15 +1988,18 @@ function updateRemotes(dt) {
     const jt = (now - (r.jtLocal || 0)) / 1000;      // прыжок по формуле, без лишних записей
     if (s.jt && s.jt !== r.jtSeen) { r.jtSeen = s.jt; r.jtLocal = now; }
     const jumpY = jt < JUMP_T ? JUMP_POWER * jt - GRAVITY * jt * jt / 2 : 0;
-    m.root.position.set(r.x, floorY(r.f), r.z);
+    m.root.position.set(r.x, standY(r.f, r.x, r.z), r.z);
     m.rig.position.y = bob + Math.max(0, jumpY) + (s.sit ? 0.06 : 0);
     m.rig.rotation.y = r.angle;
     m.legs[0].rotation.x = s.sit ? -1.5 : swing; m.legs[1].rotation.x = s.sit ? -1.5 : -swing;
     m.arms[0].rotation.x = s.u ? -2.4 : s.sit ? -1.1 : -swing * 0.8;
     m.arms[1].rotation.x = s.d ? -2.5 : s.sit ? -1.1 : swing * 0.8;
     m.mug.visible = !!s.d;
-    if (r.wasU && !s.u && (CHARACTERS[r.cid].id === 'yarik' || r.wasH)) hugeCloud(m.head);   // выдохнул у друга
-    r.wasU = s.u; r.wasH = s.h;
+    if (r.wasU && !s.u) {                                          // выдохнул у друга
+      if (r.wasH) exhaleSmoke(m.head, r.wasH - 1, r.wasHS);
+      else if (CHARACTERS[r.cid].id === 'yarik') hugeCloud(m.head);
+    }
+    r.wasU = s.u; r.wasH = s.h; r.wasHS = s.hs;
     m.setMood(s.e >= 0 ? FACE_NAMES[s.e] : s.b ? 'happy' : 'calm');
   }
 }
