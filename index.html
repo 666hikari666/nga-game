@@ -1065,7 +1065,10 @@ const NET_ID = (() => { try { return sessionStorage.nga_id || (sessionStorage.ng
 (async () => {
   [room, db] = await Promise.all([window.claude?.use?.('room'), window.claude?.use?.('db')]);
   if (!db) return;
-  db.collection('online').onSnapshot(snap => syncPeers(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
+  const onSnap = snap => syncPeers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+  db.collection('online').onSnapshot(onSnap);
+  // живые обновления доходят не у всех — дополнительно сами спрашиваем базу
+  setInterval(() => db.collection('online').get().then(onSnap).catch(() => {}), 400);
   addEventListener('pagehide', () => db.collection('online').doc(NET_ID).delete().catch(() => {}));
 })();
 function syncPeers(docs) {
