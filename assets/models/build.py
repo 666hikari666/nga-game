@@ -4,7 +4,7 @@ sys.path.insert(0, sys.argv[1]); from load import load, render
 V, N, F = load(sys.argv[2]); OUT = sys.argv[3]
 x, y, z = V[:, 0], V[:, 1], V[:, 2]
 hx = lambda h: np.array([int(h[i:i+2], 16) for i in (1, 3, 5)], np.float32)
-COL = dict(hair=hx('#5e3420'), skin=hx('#e9ac7f'), hood=hx('#2a2633'), zip=hx('#5a5a62'),
+COL = dict(hair=hx('#5e3420'), skin=hx('#e8ac7e'), hood=hx('#2a2633'), zip=hx('#5a5a62'),
            pants=hx('#1c1a22'), shoe=hx('#8f8672'), sole=hx('#1a181e'))
 lab = np.full(len(V), 'hood', object)
 lab[y < 0.36] = 'pants'
@@ -21,7 +21,9 @@ zipm = (y > 0.38) & (y < 0.66) & (np.abs(np.abs(x) - 0.022) < 0.006) & (z > 0.07
 lab[zipm] = 'zip'
 C = np.stack([COL[l] for l in lab]).astype(np.float32)
 # лёгкая «запечённая» тень: снизу темнее, сверху светлее
-C *= (0.8 + 0.25 * np.clip(N[:, 1] * 0.5 + 0.5, 0, 1))[:, None]
+shade = (0.8 + 0.25 * np.clip(N[:, 1] * 0.5 + 0.5, 0, 1))
+shade[lab == 'skin'] = 1      # кожа без тени — ровно как фон текстуры лица
+C *= shade[:, None]
 C = np.clip(C, 0, 255)
 render(V, C.astype(np.uint8), OUT + '_front.png', 'front'); render(V, C.astype(np.uint8), OUT + '_side.png', 'side')
 
@@ -55,7 +57,7 @@ parts = {
   'armR':  armZ(OV) & (cx > 0),
 }
 # лицо: передние треугольники головы — отдельная часть с текстурой эмоций
-FB = (-0.105, 0.105, 0.672, 0.845)
+FB = (-0.112, 0.112, 0.668, 0.85)
 face = (cy > FB[2]) & (cy < FB[3]) & (cx > FB[0]) & (cx < FB[1]) & (tn[:, 2] > 0.3)
 cz = cen[:, 2]
 # Чёлка модели висит перед лицом, а под ней нет лба. Поэтому всё лицо (вместе с чёлкой над глазами)
@@ -79,6 +81,11 @@ for _ in range(40):
     nb = np.stack([pad[:-2, 1:-1], pad[2:, 1:-1], pad[1:-1, :-2], pad[1:-1, 2:]])
     depth[m] = np.nanmean(nb, 0)[m]
 depth = np.nan_to_num(depth, nan=0.15) + 0.004    # чуть вперёд, чтобы не утонуть в голове
+# края маски загибаем внутрь головы: бока и верх уходят под волосы, рамки не видно
+uu = np.abs(np.linspace(-1, 1, GX))[None, :]; vv = np.linspace(0, 1, GY)[:, None]
+side = np.clip((uu - 0.7) / 0.3, 0, 1) ** 2
+top = np.clip((vv - 0.8) / 0.2, 0, 1) ** 2
+depth -= 0.045 * np.maximum(side, top)
 PIV = {'torso': (0, 0, 0), 'head': (0, 0.665, 0), 'legL': (-0.06, 0.355, 0), 'legR': (0.06, 0.355, 0),
        'armL': (-0.15, 0.62, 0), 'armR': (0.15, 0.62, 0), 'face': (0, 0.665, 0)}
 

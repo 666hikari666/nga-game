@@ -900,7 +900,7 @@ const JUMP_POWER = 7;           // сила прыжка (больше = выш�
 const GRAVITY = 22;             // как быстро падает обратно
 const SIT_TIME = 0.7;           // сколько секунд садится за комп
 const BUZZ_DURATION = 15;     // сколько секунд держится «мыло» после пива
-let emote = 0, emoteT = 0;   // эмоция по кнопке E
+let emote = 0, emoteT = 0;   // эмоция по кнопке J
 let drinkTime = 0, nearBar = false, buzzTime = 0, soap = 0;
 const promptEl = document.getElementById('prompt');
 const promptTextEl = document.getElementById('promptText');
@@ -922,7 +922,7 @@ addEventListener('keydown', e => {
     if (e.code === 'Enter' || e.code === 'Space') startGame(highlighted);
   } else if (e.code === 'Escape') backToSelect();
   else if (e.code === 'KeyF' && nearBar && drinkTime <= 0) { drinkTime = DRINK_DURATION; SFX.can(); }
-  else if (e.code === 'KeyE' && !e.repeat) { emote = (emote + 1) % FACE_NAMES.length; emoteT = 3; SFX.click(); }
+  else if (e.code === 'KeyJ' && !e.repeat) { emote = (emote + 1) % FACE_NAMES.length; emoteT = 3; SFX.click(); }
   else if (e.code === 'Space' && !e.repeat && player.jumpY === 0 && drinkTime <= 0) { player.vy = JUMP_POWER; SFX.jump(); }
   else if (e.code === 'KeyF' && nearPC && drinkTime <= 0 && player.jumpY === 0) { enterPC(nearPC); SFX.click(); }
   else if (e.code === 'KeyF' && nearSlot && drinkTime <= 0 && player.jumpY === 0) { enterSlot(nearSlot); SFX.coin(); }
@@ -1056,7 +1056,7 @@ function update(dt, t) {
 
   // После пива: весёлое лицо и мыльный экран на 15 секунд
   if (buzzTime > 0) buzzTime = Math.max(0, buzzTime - dt);
-  // лицо: эмоция по кнопке E (3 с) → удивление в прыжке → после пива смеётся → обычное
+  // лицо: эмоция по кнопке J (3 с) → удивление в прыжке → после пива смеётся → обычное
   if (emoteT > 0) emoteT -= dt;
   p.setMood(emoteT > 0 ? FACE_NAMES[emote] : player.jumpY > 0.3 ? 'shocked' : buzzTime > 0 ? 'happy' : 'calm');
   soap = buzzTime > 0 ? Math.min(1, (BUZZ_DURATION - buzzTime) * 1.5, buzzTime / 3) : 0;  // плавно вкл/выкл
@@ -1117,7 +1117,7 @@ function update(dt, t) {
   }
 
   osdMode.textContent = 'PLAY ▶ ' + c.name;
-  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · E — эмоция · ESC — назад';
+  if (drinkTime <= 0 && useTime <= 0 && !pcMode && !slotMode) hint.textContent = 'WASD — бегать · ПРОБЕЛ — прыжок · ЛКМ — ' + USE_LABEL[c.id] + ' · J — эмоция · ESC — назад';
 }
 
 // ---------------------------------------------------------------------
