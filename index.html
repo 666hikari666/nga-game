@@ -1088,7 +1088,7 @@ function syncPeers(docs) {
   }
   for (const [id, r] of remotes) if (!seen.has(id)) { scene.remove(r.model.root); remotes.delete(id); }
 }
-let netLast = 0, netKey = '', netBeat = 0;
+let netLast = 0, netKey = '', netBeat = 0, netErr = '';
 function netTick(t) {
   if (!db || t - netLast < 0.25) return;            // 4 раза в секунду, между пакетами сглаживаем
   netLast = t;
@@ -1101,7 +1101,9 @@ function netTick(t) {
   const key = JSON.stringify(s);
   if (key === netKey && t - netBeat < 3) return;     // стоит на месте — раз в 3 с «я тут»
   netKey = key; netBeat = t;
-  db.collection('online').doc(NET_ID).set({ s, t: Date.now() }).catch(() => {});
+  db.collection('online').doc(NET_ID).set({ s, t: Date.now() })
+    .then(() => { netErr = ''; })
+    .catch(e => { netErr = (e && (e.code || e.message)) || 'ошибка'; netKey = ''; });   // покажем в OSD и повторим
 }
 function updateRemotes(dt) {
   for (const r of remotes.values()) {
@@ -1178,7 +1180,7 @@ function loop() {
   const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
   update(dt, t); updatePuffs(dt); updateRemotes(dt); netTick(t); soundTick(dt);
   // статус сети прямо в OSD: видно, подключился ли ты и сколько людей на странице
-  osdMode.textContent += !db ? ' · ОФЛАЙН' : ` · ОНЛАЙН: ${remotes.size + 1}`;
+  osdMode.textContent += !db ? ' · ОФЛАЙН' : ` · ОНЛАЙН: ${remotes.size + 1}` + (netErr ? ` · НЕ ОТПРАВЛЯЕТСЯ: ${netErr}` : '');
   renderer.render(scene, camera);
   const s = Math.floor(t), pad = n => String(n).padStart(2, '0');
   timecode.textContent = `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
