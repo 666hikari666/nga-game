@@ -4,7 +4,12 @@
 Персонажи: Даня, Ярик, Эдик (`assets/chars/<id>/`).
 
 ## Опубликовано
-- claude.ai: https://claude.ai/artifact/MerF256DAJ5kS4dSfdLh5H (capabilities: `db`, `assets` upload `interact`, `room` topic `live` `interact`)
+- **Основное:** GitHub Pages https://666hikari666.github.io/nga-game/ (репо github.com/666hikari666/nga-game, ветка `main`).
+  Обновить = закоммитить и `git push`, Pages пересобирается сам за минуту.
+- Онлайн: Firebase проект `nga-game`, Realtime Database (europe-west1). `firebase-net.js` подменяет `window.claude.use('db'|'assets')`
+  поверх Firebase, поэтому код игры и слотов не знает, где хранятся данные. Правила — `database.rules.json`
+  (вставляются вручную в консоли Firebase → Realtime Database → Rules). Картинки работ — data URL прямо в `tries`.
+- Старое: claude.ai https://claude.ai/artifact/MerF256DAJ5kS4dSfdLh5H (там внешние запросы запрещены, Firebase не грузится, онлайн через db claude.ai с лимитом для гостей)
 - Старая отдельная страница слотов: https://claude.ai/artifact/GuQSGtodBUNAJHk8JFMMbT (исходник `D:\Design game\nga-design-game.html`), у неё своя база.
 
 ## Устройство
