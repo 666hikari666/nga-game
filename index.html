@@ -1403,11 +1403,12 @@ function drawIcon(g, ic, hot) {
   g.fillStyle = '#C9D3E0'; g.font = '14px VT323, monospace'; g.textAlign = 'center';
   g.fillText(ic.label, x + 32, y + 44);
 }
+const iconUnderCursor = () => ICONS.find(ic => os.mouse.x > ic.x - 6 && os.mouse.x < ic.x + 70 && os.mouse.y > ic.y - 4 && os.mouse.y < ic.y + 50) || null;
 function drawDesktop(g) {
   g.fillStyle = '#1f2a4a'; g.fillRect(0, 0, PIG.w, PIG.h);       // обои
   g.fillStyle = 'rgba(255,46,154,.18)'; g.font = '64px VT323, monospace'; g.textAlign = 'center';
   g.fillText('NGA', PIG.w / 2 + 40, 130);
-  os.hover = ICONS.find(ic => os.mouse.x > ic.x - 6 && os.mouse.x < ic.x + 70 && os.mouse.y > ic.y - 4 && os.mouse.y < ic.y + 50) || null;
+  os.hover = iconUnderCursor();
   for (const ic of ICONS) drawIcon(g, ic, ic === os.hover);
   g.fillStyle = '#3B3F58'; g.fillRect(0, PIG.h - 20, PIG.w, 20);  // панель задач
   g.fillStyle = '#7CFF5B'; g.fillRect(3, PIG.h - 17, 44, 14);
@@ -1450,7 +1451,7 @@ function screenDraw() {
 }
 function screenClick() {
   SFX.click();
-  if (os.app === 'desktop' && os.hover) openApp(os.hover.id);
+  if (os.app === 'desktop') { os.hover = iconUnderCursor(); if (os.hover) openApp(os.hover.id); }   // на телефоне тап приходит без наведения
   else if (os.app === 'raid') raidShoot();
   else if (os.app === 'studio') studioClick();
 }
