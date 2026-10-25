@@ -1375,10 +1375,12 @@ const ICONS = [
   { id: 'pig',   label: 'ХРЮК-РАННЕР', x: 18, y: 16 },
   { id: 'raid',  label: 'ТАРКОВ',      x: 18, y: 76 },
   { id: 'trash', label: 'ПРАВКИ_v12',  x: 18, y: 136 },
+  { id: 'studio', label: 'NGA СТУДИЯ', x: 110, y: 16 },
 ];
 function openApp(id) {
   if (id === 'pig') { os.app = 'pig'; pig.state = 'ready'; }
   if (id === 'raid') { os.app = 'raid'; raidNew(); }
+  if (id === 'studio') { os.app = 'studio'; studioOpen(); }
   if (id === 'trash') os.toast = 3;                               // «файл повреждён» — шутка
 }
 function drawIcon(g, ic, hot) {
@@ -1391,6 +1393,10 @@ function drawIcon(g, ic, hot) {
     g.fillStyle = '#5b6b3a'; g.fillRect(x + 16, y + 2, 32, 28);
     g.strokeStyle = '#d9d3a0'; g.lineWidth = 2; g.beginPath(); g.arc(x + 32, y + 16, 9, 0, 7); g.stroke();
     g.fillStyle = '#d9d3a0'; g.fillRect(x + 31, y + 4, 2, 24); g.fillRect(x + 20, y + 15, 24, 2);
+  } else if (ic.id === 'studio') {                                // монитор с розовой «N»
+    g.fillStyle = '#C9D3E0'; g.fillRect(x + 14, y + 2, 36, 26); g.fillStyle = '#1A1424'; g.fillRect(x + 17, y + 5, 30, 18);
+    g.fillStyle = '#FF2E9A'; g.fillRect(x + 25, y + 8, 3, 12); g.fillRect(x + 36, y + 8, 3, 12); g.fillRect(x + 28, y + 10, 3, 4); g.fillRect(x + 32, y + 14, 3, 4);
+    g.fillStyle = '#C9D3E0'; g.fillRect(x + 28, y + 28, 8, 4);
   } else {                                                        // папка
     g.fillStyle = '#FF8A2B'; g.fillRect(x + 16, y + 8, 32, 22); g.fillRect(x + 16, y + 4, 14, 6);
   }
@@ -1430,12 +1436,14 @@ function screenUpdate(dt) {
   if (os.toast > 0) os.toast -= dt;
   if (os.app === 'pig') pigUpdate(dt);
   if (os.app === 'raid') raidUpdate(dt);
+  if (os.app === 'studio') studioUpdate(dt);
 }
 function screenDraw() {
   const g = pg;
   if (os.app === 'desktop') drawDesktop(g);
   if (os.app === 'pig') pigDraw();
   if (os.app === 'raid') raidDraw(g);
+  if (os.app === 'studio') studioDraw(g);
   if (os.app !== 'pig') drawCursor(g, os.app === 'raid');
   g.fillStyle = 'rgba(0,0,0,.25)'; for (let yy = 0; yy < PIG.h; yy += 3) g.fillRect(0, yy, PIG.w, 1); // сканлайны ЭЛТ
   pigTex.needsUpdate = true;
@@ -1444,12 +1452,279 @@ function screenClick() {
   SFX.click();
   if (os.app === 'desktop' && os.hover) openApp(os.hover.id);
   else if (os.app === 'raid') raidShoot();
+  else if (os.app === 'studio') studioClick();
 }
 const APP_HINT = {
   desktop: 'МЫШЬ — курсор · ЛКМ — открыть · ESC — встать из-за компа',
   pig:     'ПРОБЕЛ — прыжок свиньи · ESC — на рабочий стол',
   raid:    'WASD — идти · ЛКМ — стрелять · ESC — на рабочий стол',
+  studio:  'ЛКМ — делать макеты, нанимать, покупать · ESC — на рабочий стол',
 };
+
+// ---------------------------------------------------------------------
+//  КЛИКЕР «NGA СТУДИЯ» — развиваешь свою дизайн-студию.
+//  Клик по монитору = макет = деньги. Нанимаешь штат (доход в секунду),
+//  покупаешь апгрейды офиса (множители), ловишь звонки клиентов (бонусы).
+//  Заработал миллион за забег — РЕБРЕНДИНГ: всё с нуля, но с репутацией
+//  (+5% к доходу навсегда за каждую). Прогресс хранится в этом браузере,
+//  пока игра закрыта, студия работает на 50% (до 8 часов).
+// ---------------------------------------------------------------------
+const STAFF = [
+  { name: 'СТАЖЁР',         cost: 15,     cps: 0.2 },
+  { name: 'ДЖУН',           cost: 120,    cps: 1.5 },
+  { name: 'МИДЛ',           cost: 1.1e3,  cps: 9 },
+  { name: 'СЕНЬОР',         cost: 1.2e4,  cps: 50 },
+  { name: 'АРТ-ДИРЕКТОР',   cost: 1.3e5,  cps: 260 },
+  { name: 'МОУШН-ОТДЕЛ',    cost: 1.4e6,  cps: 1400 },
+  { name: '3D-ЦЕХ',         cost: 2e7,    cps: 7800 },
+  { name: 'НЕЙРОРЕНДЕР',    cost: 3.3e8,  cps: 4.4e4 },
+  { name: 'ФИЛИАЛ В ДУБАЕ', cost: 5.1e9,  cps: 2.6e5 },
+  { name: 'МОНОПОЛИЯ',      cost: 7.5e10, cps: 1.6e6 },
+];
+const STAFF_PERKS = [   // апгрейды ×2 к сотруднику, открываются при 10 / 25 / 50 штуках
+  ['ПЕЧЕНЬКИ', 'БЕСПЛАТНЫЙ ОБЕД', 'ОБЕЩАНИЕ ОФФЕРА'],
+  ['ТУТОРИАЛЫ С ЮТУБА', 'ВТОРОЙ МОНИТОР', 'ФИГМА PRO'],
+  ['КРЕСЛО С ИЗОЛЕНТОЙ', 'НАУШНИКИ-ШУМОДАВ', 'УДАЛЁНКА'],
+  ['МАКБУК', 'БЕЗ СОЗВОНОВ', 'ОПЦИОН'],
+  ['ЧЁРНАЯ ВОДОЛАЗКА', 'МУДБОРД НА СТЕНЕ', 'ПРАВО ВЕТО'],
+  ['РЕНДЕР-ФЕРМА', 'ПЛАГИНЫ AE', 'ВИДЕОКАРТЫ ИЗ ТАРКОВА'],
+  ['ДОНАТ В BLENDER', 'ЛИЦЕНЗИЯ HOUDINI', 'СВОЙ МОКАП-ЗАЛ'],
+  ['ПРОМПТ-ИНЖЕНЕР', 'СВОЯ НЕЙРОСЕТЬ', 'ДАТАЦЕНТР В ПОДВАЛЕ'],
+  ['ОФИС С ВИДОМ', 'ЛАМБА ДЛЯ ВСТРЕЧ', 'ШЕЙХ-КЛИЕНТ'],
+  ['ЛОББИ', 'СВОЙ ШРИФТ', 'ЛОГО НА ЛУНЕ'],
+];
+const PERKS = [];
+STAFF.forEach((s, i) => [10, 25, 50].forEach((n, j) => PERKS.push({
+  id: `s${i}_${n}`, name: STAFF_PERKS[i][j], text: `${s.name} ×2`, cost: s.cost * [20, 200, 5000][j],
+  staff: i, need: st => st.owned[i] >= n,
+})));
+PERKS.push(
+  { id: 'c1', name: 'ГРАФИЧЕСКИЙ ПЛАНШЕТ', text: 'КЛИК ×2',             cost: 100,  click: 2,      need: st => st.clicks >= 30 },
+  { id: 'c2', name: 'МЕХАНИЧЕСКАЯ КЛАВА',  text: 'КЛИК ×2',             cost: 5e3,  click: 2,      need: st => st.clicks >= 300 },
+  { id: 'c3', name: 'ГОРЯЧИЕ КЛАВИШИ',     text: 'КЛИК +5% ДОХОДА/С',   cost: 5e4,  clickCps: 0.05, need: st => st.clicks >= 800 },
+  { id: 'c4', name: 'ЭКШЕНЫ В ФОТОШОПЕ',   text: 'КЛИК +5% ДОХОДА/С',   cost: 5e7,  clickCps: 0.05, need: st => st.clicks >= 2000 },
+  { id: 'c5', name: 'ТРЕТИЙ МОНИТОР',      text: 'КЛИК ×3',             cost: 5e9,  click: 3,      need: st => st.clicks >= 5000 },
+  { id: 'g1', name: 'КАЛЬЯН В ОФИСЕ',      text: 'ВЕСЬ ДОХОД ×1.5',     cost: 1e6,  all: 1.5,      need: st => st.total >= 3e5 },
+  { id: 'g2', name: 'ПОДПИСКА ADOBE',      text: 'ВЕСЬ ДОХОД ×1.5',     cost: 1e9,  all: 1.5,      need: st => st.total >= 3e8 },
+  { id: 'g3', name: 'СВОЙ ЮТУБ-КАНАЛ',     text: 'ВЕСЬ ДОХОД ×2',       cost: 1e11, all: 2,        need: st => st.total >= 3e10 },
+  { id: 'g4', name: 'ЗВОНКИ ЧАЩЕ',         text: 'КЛИЕНТЫ ЗВОНЯТ ×2',   cost: 2e5,  calls: 2,      need: st => st.total >= 5e4 },
+);
+const STUDIO_RANKS = [[0, 'ФРИЛАНС В ПОДВАЛЕ'], [1e3, 'ДВОЕ И КОТ'], [1e5, 'СТУДИЯ NGA'], [1e7, 'АГЕНТСТВО'],
+  [1e9, 'ХОЛДИНГ'], [1e12, 'ИМПЕРИЯ ДИЗАЙНА'], [1e15, 'ЛЕГЕНДА БЕХАНСА']];
+const REP_BONUS = 0.05;                      // +5% дохода за каждую репутацию
+const OFFLINE_RATE = 0.5, OFFLINE_MAX = 8 * 3600;
+const SAVE_KEY = 'nga_studio_v1';
+
+const st = { money: 0, total: 0, allTime: 0, rep: 0, owned: STAFF.map(() => 0), perks: {}, clicks: 0, last: 0 };
+const studio = { tab: 'staff', page: 0, btns: [], pops: [], call: null, callT: 30, buffs: {}, toast: '', toastT: 0,
+  press: 0, confirm: 0, saveT: 0, loaded: false };
+
+function studioLoad() {
+  if (studio.loaded) return;
+  studio.loaded = true;
+  try { Object.assign(st, JSON.parse(localStorage.getItem(SAVE_KEY)) || {}); } catch {}
+  st.owned = STAFF.map((_, i) => st.owned[i] || 0);
+}
+function studioSave() {
+  st.last = Date.now();
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(st)); } catch {}
+}
+function studioOpen() {
+  studioLoad();
+  if (st.last) {                                                  // доход, пока тебя не было
+    const away = Math.min(OFFLINE_MAX, (Date.now() - st.last) / 1000);
+    const gain = cps() * away * OFFLINE_RATE;
+    if (away > 30 && gain >= 1) { earn(gain); studioToast(`ПОКА ТЕБЯ НЕ БЫЛО: +${fmt(gain)} ₽`); }
+  }
+  studioSave();
+}
+const fmt = n => {
+  if (n < 1000) return n < 10 && n % 1 ? n.toFixed(1) : String(Math.floor(n));
+  const u = ['K', 'M', 'B', 'T', 'Qa', 'Qi', 'Sx', 'Sp', 'Oc'];
+  let i = -1; while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+  return (n < 100 ? n.toFixed(1) : Math.floor(n)) + u[i];
+};
+const hasPerk = id => !!st.perks[id];
+const staffCost = i => Math.ceil(STAFF[i].cost * Math.pow(1.15, st.owned[i]));
+function globalMult() {
+  let m = 1 + st.rep * REP_BONUS;
+  for (const p of PERKS) if (p.all && hasPerk(p.id)) m *= p.all;
+  if (studio.buffs.deadline > 0) m *= 7;
+  return m;
+}
+function staffMult(i) { let m = 1; for (const p of PERKS) if (p.staff === i && hasPerk(p.id)) m *= 2; return m; }
+const staffCps = i => STAFF[i].cps * staffMult(i) * globalMult();
+const cps = () => STAFF.reduce((sum, s, i) => sum + st.owned[i] * staffCps(i), 0);
+function clickValue() {
+  let v = 1, share = 0;
+  for (const p of PERKS) if (hasPerk(p.id)) { if (p.click) v *= p.click; if (p.clickCps) share += p.clickCps; }
+  v = v * (1 + st.rep * REP_BONUS) + cps() * share;
+  if (studio.buffs.frenzy > 0) v *= 10;
+  return v;
+}
+const repGain = () => Math.floor(Math.sqrt(st.total / 1e6));
+const rankName = () => STUDIO_RANKS.filter(([n]) => st.total >= n).pop()[1];
+function earn(v) { st.money += v; st.total += v; st.allTime += v; }
+function studioToast(text) { studio.toast = text; studio.toastT = 3.5; }
+function pop(x, y, text, color = '#7CFF5B') { studio.pops.push({ x, y, text, color, t: 0 }); }
+
+function studioUpdate(dt) {
+  earn(cps() * dt);
+  for (const k in studio.buffs) studio.buffs[k] = Math.max(0, studio.buffs[k] - dt);
+  studio.press = Math.max(0, studio.press - dt); studio.confirm = Math.max(0, studio.confirm - dt);
+  if (studio.toastT > 0) studio.toastT -= dt;
+  for (const p of studio.pops) p.t += dt;
+  studio.pops = studio.pops.filter(p => p.t < 1);
+  // звонок клиента: кнопка появляется в случайном месте на 10 секунд
+  if (studio.call) { studio.call.t -= dt; if (studio.call.t <= 0) studio.call = null; }
+  else if ((studio.callT -= dt * (hasPerk('g4') ? 2 : 1)) <= 0) {
+    studio.call = { x: 10 + Math.random() * 230, y: 40 + Math.random() * 150, t: 10 };
+    studio.callT = 40 + Math.random() * 50;
+  }
+  if ((studio.saveT -= dt) <= 0) { studioSave(); studio.saveT = 2; }
+}
+function answerCall() {
+  const r = Math.random(), { x, y } = studio.call;
+  if (r < 0.5) { const v = Math.max(cps() * 90, clickValue() * 30, 25); earn(v); studioToast(`ЗАКАЗ ОПЛАЧЕН: +${fmt(v)} ₽`); }
+  else if (r < 0.75) { studio.buffs.deadline = 30; studioToast('ДЕДЛАЙН-РЕЖИМ: ДОХОД ×7 НА 30 С'); }
+  else { studio.buffs.frenzy = 15; studioToast('ВДОХНОВЕНИЕ: КЛИК ×10 НА 15 С'); }
+  pop(x + 30, y, '☎!', '#FF8A2B'); studio.call = null; SFX.coin();
+}
+function rebrand() {
+  const g = repGain();
+  if (g < 1) return;
+  if (studio.confirm <= 0) { studio.confirm = 3; return; }       // второй клик подтверждает
+  Object.assign(st, { money: 0, total: 0, rep: st.rep + g, owned: STAFF.map(() => 0), perks: {} });
+  studio.buffs = {}; studio.page = 0; studio.tab = 'staff'; studio.confirm = 0;
+  studioToast(`РЕБРЕНДИНГ! +${g} РЕПУТАЦИИ`); studioSave(); SFX.coin();
+}
+
+// --- рисование: кнопки собираются заново каждый кадр, клик ищет кнопку под курсором ---
+function sBtn(g, x, y, w, h, onClick, fill, hoverFill) {
+  const hot = os.mouse.x >= x && os.mouse.x < x + w && os.mouse.y >= y && os.mouse.y < y + h;
+  if (fill) { g.fillStyle = hot && hoverFill ? hoverFill : fill; g.fillRect(x, y, w, h); }
+  studio.btns.push({ x, y, w, h, onClick });
+  return hot;
+}
+function sText(g, text, x, y, color = '#C9D3E0', size = 13, align = 'left') {
+  g.fillStyle = color; g.font = `${size}px VT323, monospace`; g.textAlign = align; g.fillText(text, x, y);
+}
+function studioDraw(g) {
+  studio.btns = [];
+  g.fillStyle = '#14101c'; g.fillRect(0, 0, PIG.w, PIG.h);
+  g.fillStyle = '#1A1424'; g.fillRect(0, 0, PIG.w, 18);
+  sText(g, 'NGA СТУДИЯ', 5, 13, '#FF2E9A', 15);
+  sText(g, `₽ ${fmt(st.money)}`, PIG.w - 5, 14, '#7CFF5B', 17, 'right');
+
+  // ЛЕВАЯ ЧАСТЬ: большая кнопка «МАКЕТ» и цифры
+  sText(g, rankName(), 66, 31, '#FF8A2B', 13, 'center');
+  const s = studio.press > 0 ? 3 : 0;
+  sBtn(g, 18 + s, 38 + s, 96 - s * 2, 74 - s * 2, () => {
+    const v = clickValue(); earn(v); st.clicks++; studio.press = 0.08;
+    pop(os.mouse.x, os.mouse.y, '+' + fmt(v));
+  }, '#C9D3E0', '#e2e8f0');
+  g.fillStyle = '#1A1424'; g.fillRect(25 + s, 44 + s, 82 - s * 2, 52 - s * 2);           // ЭЛТ-экран кнопки
+  g.fillStyle = studio.buffs.frenzy > 0 ? '#FF8A2B' : '#FF2E9A';
+  g.fillRect(48, 56, 8, 26); g.fillRect(56, 56, 14, 8); g.fillRect(70, 56, 8, 26);    // буква «П» = «проект»
+  sText(g, 'МАКЕТ', 66, 106, '#1A1424', 13, 'center');
+  sText(g, `+${fmt(clickValue())} ЗА КЛИК`, 66, 128, '#C9D3E0', 13, 'center');
+  sText(g, `${fmt(cps())} ₽/СЕК`, 66, 142, '#7CFF5B', 14, 'center');
+  sText(g, `РЕПУТАЦИЯ ${st.rep} (+${Math.round(st.rep * REP_BONUS * 100)}%)`, 66, 156, '#2EE6FF', 12, 'center');
+  let by = 172;
+  if (studio.buffs.deadline > 0) { sText(g, `ДЕДЛАЙН ×7 · ${Math.ceil(studio.buffs.deadline)}С`, 66, by, '#E3262B', 13, 'center'); by += 13; }
+  if (studio.buffs.frenzy > 0)   { sText(g, `КЛИК ×10 · ${Math.ceil(studio.buffs.frenzy)}С`, 66, by, '#FF8A2B', 13, 'center'); by += 13; }
+  sText(g, `МАКЕТОВ: ${fmt(st.clicks)}`, 66, 232, 'rgba(201,211,224,.5)', 12, 'center');
+
+  // ПРАВАЯ ЧАСТЬ: вкладки
+  const X = 132, W = PIG.w - X - 3;
+  const canPerk = PERKS.some(p => !hasPerk(p.id) && p.need(st) && st.money >= p.cost);
+  [['staff', 'ШТАТ'], ['office', 'ОФИС' + (canPerk ? ' •' : '')], ['rebrand', 'РЕБРЕНД']].forEach(([id, label], i) => {
+    const on = studio.tab === id;
+    sBtn(g, X + i * 62, 21, 60, 14, () => { studio.tab = id; studio.page = 0; }, on ? '#3B3F58' : '#221b30', '#2c3450');
+    sText(g, label, X + i * 62 + 30, 32, on ? '#fff' : '#8a8fa8', 13, 'center');
+  });
+
+  const ROWS = 7, RH = 25, Y0 = 38;
+  let items = [];
+  if (studio.tab === 'staff') {
+    const top = st.owned.reduce((m, n, i) => n > 0 ? i : m, -1);
+    items = STAFF.map((s, i) => i).filter(i => i <= top + 1);          // следующего показываем заранее
+  } else if (studio.tab === 'office') {
+    items = PERKS.filter(p => !hasPerk(p.id) && p.need(st)).sort((a, b) => a.cost - b.cost);
+  }
+  const pages = Math.max(1, Math.ceil(items.length / ROWS));
+  studio.page = Math.min(studio.page, pages - 1);
+  const shown = items.slice(studio.page * ROWS, studio.page * ROWS + ROWS);
+
+  if (studio.tab === 'staff') shown.forEach((i, r) => {
+    const y = Y0 + r * RH, cost = staffCost(i), ok = st.money >= cost;
+    sBtn(g, X, y, W, RH - 2, () => {
+      if (st.money < staffCost(i)) return;
+      st.money -= staffCost(i); st.owned[i]++; SFX.coin(); studioSave();
+    }, ok ? '#232a3f' : '#1b1726', '#2f3a58');
+    sText(g, STAFF[i].name, X + 4, y + 10, ok ? '#fff' : '#8a8fa8');
+    sText(g, `×${st.owned[i]}`, X + W - 4, y + 10, '#FF8A2B', 13, 'right');
+    sText(g, `₽ ${fmt(cost)}`, X + 4, y + 20, ok ? '#7CFF5B' : '#b05050', 12);
+    sText(g, `+${fmt(staffCps(i))}/С`, X + W - 4, y + 20, '#2EE6FF', 12, 'right');
+  });
+  if (studio.tab === 'office') {
+    if (!items.length) {
+      sText(g, 'ПОКА НЕЧЕГО ПОКУПАТЬ.', X + W / 2, 80, '#8a8fa8', 13, 'center');
+      sText(g, 'НАНИМАЙ ЛЮДЕЙ И КЛИКАЙ —', X + W / 2, 96, '#8a8fa8', 13, 'center');
+      sText(g, 'ОТКРОЮТСЯ АПГРЕЙДЫ', X + W / 2, 110, '#8a8fa8', 13, 'center');
+    }
+    shown.forEach((p, r) => {
+      const y = Y0 + r * RH, ok = st.money >= p.cost;
+      sBtn(g, X, y, W, RH - 2, () => {
+        if (st.money < p.cost || hasPerk(p.id)) return;
+        st.money -= p.cost; st.perks[p.id] = 1; SFX.coin(); studioToast(`КУПЛЕНО: ${p.name}`); studioSave();
+      }, ok ? '#232a3f' : '#1b1726', '#2f3a58');
+      sText(g, p.name, X + 4, y + 10, ok ? '#fff' : '#8a8fa8');
+      sText(g, p.text, X + 4, y + 20, '#2EE6FF', 12);
+      sText(g, `₽ ${fmt(p.cost)}`, X + W - 4, y + 20, ok ? '#7CFF5B' : '#b05050', 12, 'right');
+    });
+  }
+  if (studio.tab === 'rebrand') {
+    const gain = repGain(), cx = X + W / 2;
+    sText(g, 'РЕБРЕНДИНГ', cx, 56, '#FF2E9A', 20, 'center');
+    sText(g, 'НАЧНИ С НУЛЯ, НО С РЕПУТАЦИЕЙ:', cx, 76, '#C9D3E0', 12, 'center');
+    sText(g, `+${Math.round(REP_BONUS * 100)}% К ДОХОДУ ЗА КАЖДУЮ, НАВСЕГДА`, cx, 89, '#C9D3E0', 12, 'center');
+    sText(g, `ЗАРАБОТАНО ЗА ЗАБЕГ: ₽ ${fmt(st.total)}`, cx, 112, '#7CFF5B', 13, 'center');
+    sText(g, `ПОЛУЧИШЬ: +${gain} РЕП`, cx, 128, '#2EE6FF', 15, 'center');
+    if (gain < 1) sText(g, 'НУЖНО ЗАРАБОТАТЬ ₽ 1M ЗА ЗАБЕГ', cx, 146, '#8a8fa8', 12, 'center');
+    else {
+      sBtn(g, cx - 60, 150, 120, 22, rebrand, studio.confirm > 0 ? '#E3262B' : '#FF2E9A', '#ff5cb3');
+      sText(g, studio.confirm > 0 ? 'ТОЧНО? ЖМИ ЕЩЁ' : 'РЕБРЕНД!', cx, 166, '#1A1424', 15, 'center');
+    }
+    sText(g, `ЗА ВСЁ ВРЕМЯ: ₽ ${fmt(st.allTime)}`, cx, 198, 'rgba(201,211,224,.5)', 12, 'center');
+  }
+  if (pages > 1) {                                                // листалка
+    sBtn(g, X, 222, 24, 15, () => { studio.page = Math.max(0, studio.page - 1); }, '#221b30', '#3B3F58');
+    sBtn(g, X + W - 24, 222, 24, 15, () => { studio.page = Math.min(pages - 1, studio.page + 1); }, '#221b30', '#3B3F58');
+    sText(g, '▲', X + 12, 234, '#fff', 13, 'center'); sText(g, '▼', X + W - 12, 234, '#fff', 13, 'center');
+    sText(g, `${studio.page + 1}/${pages}`, X + W / 2, 234, '#8a8fa8', 13, 'center');
+  }
+
+  // звонок клиента
+  if (studio.call) {
+    const c = studio.call, blink = Math.floor(c.t * 4) % 2;
+    sBtn(g, c.x, c.y, 70, 20, answerCall, blink ? '#FF8A2B' : '#ffb067');
+    sText(g, '☎ КЛИЕНТ!', c.x + 35, c.y + 14, '#1A1424', 14, 'center');
+  }
+  for (const p of studio.pops) {
+    g.globalAlpha = 1 - p.t; sText(g, p.text, p.x, p.y - p.t * 24, p.color, 14, 'center'); g.globalAlpha = 1;
+  }
+  if (studio.toastT > 0) {
+    g.fillStyle = 'rgba(26,20,36,.92)'; g.fillRect(20, 196, PIG.w - 40, 20);
+    sText(g, studio.toast, PIG.w / 2, 210, '#FF8A2B', 14, 'center');
+  }
+}
+function studioClick() {
+  for (let i = studio.btns.length - 1; i >= 0; i--) {           // сверху — то, что нарисовано последним
+    const b = studio.btns[i];
+    if (os.mouse.x >= b.x && os.mouse.x < b.x + b.w && os.mouse.y >= b.y && os.mouse.y < b.y + b.h) { b.onClick(); return; }
+  }
+}
 
 // ---------------------------------------------------------------------
 //  МИНИИГРА «ТАРКОВ: ПОДВАЛ» — вид сверху. Собери лут, не сдохни,
