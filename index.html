@@ -1467,8 +1467,8 @@ const APP_HINT = {
 //  Клик по монитору = макет = деньги. Нанимаешь штат (доход в секунду),
 //  покупаешь апгрейды офиса (множители), ловишь звонки клиентов (бонусы).
 //  Заработал миллион за забег — РЕБРЕНДИНГ: всё с нуля, но с репутацией
-//  (+5% к доходу навсегда за каждую). Прогресс хранится в этом браузере,
-//  пока игра закрыта, студия работает на 50% (до 8 часов).
+//  (+5% к доходу навсегда за каждую). Прогресс хранится в этом браузере.
+//  Студия зарабатывает всегда: пока бегаешь по клубу и пока сайт закрыт (до 24 часов).
 // ---------------------------------------------------------------------
 const STAFF = [
   { name: 'СТАЖЁР',         cost: 15,     cps: 0.2 },
@@ -1513,7 +1513,7 @@ PERKS.push(
 const STUDIO_RANKS = [[0, 'ФРИЛАНС В ПОДВАЛЕ'], [1e3, 'ДВОЕ И КОТ'], [1e5, 'СТУДИЯ NGA'], [1e7, 'АГЕНТСТВО'],
   [1e9, 'ХОЛДИНГ'], [1e12, 'ИМПЕРИЯ ДИЗАЙНА'], [1e15, 'ЛЕГЕНДА БЕХАНСА']];
 const REP_BONUS = 0.05;                      // +5% дохода за каждую репутацию
-const OFFLINE_RATE = 0.5, OFFLINE_MAX = 8 * 3600;
+const OFFLINE_RATE = 1, OFFLINE_MAX = 24 * 3600;   // пока сайт закрыт: доля дохода и максимум секунд
 const SAVE_KEY = 'nga_studio_v1';
 
 const st = { money: 0, total: 0, allTime: 0, rep: 0, owned: STAFF.map(() => 0), perks: {}, clicks: 0, last: 0 };
@@ -1530,14 +1530,23 @@ function studioSave() {
   st.last = Date.now();
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(st)); } catch {}
 }
-function studioOpen() {
+function studioWake() {                                          // при запуске игры: доход, пока сайт был закрыт
   studioLoad();
-  if (st.last) {                                                  // доход, пока тебя не было
+  if (st.last) {
     const away = Math.min(OFFLINE_MAX, (Date.now() - st.last) / 1000);
     const gain = cps() * away * OFFLINE_RATE;
-    if (away > 30 && gain >= 1) { earn(gain); studioToast(`ПОКА ТЕБЯ НЕ БЫЛО: +${fmt(gain)} ₽`); }
+    if (away > 30 && gain >= 1) { earn(gain); studio.awayGain = (studio.awayGain || 0) + gain; }
   }
   studioSave();
+}
+function studioOpen() {
+  if (studio.awayGain) { studioToast(`ПОКА ТЕБЯ НЕ БЫЛО: +${fmt(studio.awayGain)} ₽`); studio.awayGain = 0; }
+}
+function studioBackground(dt) {                                   // студия работает, даже когда ты не за компом
+  if (os.app === 'studio' && pcMode) return;                      // за компом считает studioUpdate
+  earn(cps() * dt);
+  for (const k in studio.buffs) studio.buffs[k] = Math.max(0, studio.buffs[k] - dt);
+  if ((studio.saveT -= dt) <= 0) { studioSave(); studio.saveT = 5; }
 }
 const fmt = n => {
   if (n < 1000) return n < 10 && n % 1 ? n.toFixed(1) : String(Math.floor(n));
@@ -1720,6 +1729,7 @@ function studioDraw(g) {
     sText(g, studio.toast, PIG.w / 2, 210, '#FF8A2B', 14, 'center');
   }
 }
+studioWake();
 function studioClick() {
   for (let i = studio.btns.length - 1; i >= 0; i--) {           // сверху — то, что нарисовано последним
     const b = studio.btns[i];
@@ -2897,7 +2907,7 @@ function soundTick(dt) {
 
 function loop() {
   const dt = Math.min(0.05, clock.getDelta()), t = clock.elapsedTime;
-  update(dt, t); updatePuffs(dt); updateRemotes(dt); netTick(t, dt); soundTick(dt);
+  update(dt, t); updatePuffs(dt); studioBackground(dt); updateRemotes(dt); netTick(t, dt); soundTick(dt);
   updateEnv(); updateDesert(dt, t); updateHookahs(dt, t); updatePteros(dt, t);
   // статус сети прямо в OSD: видно, подключился ли ты и сколько людей на странице
   osdMode.textContent += !db ? ' · ОФЛАЙН' : ` · ОНЛАЙН: ${remotes.size + 1}` + (netErr ? ` · НЕ ОТПРАВЛЯЕТСЯ: ${netErr}` : '');
