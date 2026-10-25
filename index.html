@@ -2,13 +2,44 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <title>NGA: Подвал</title>
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
 <style>
   html, body { margin: 0; height: 100%; background: #1A1424; overflow: hidden; }
   body { display: flex; align-items: center; justify-content: center; font-family: 'VT323', monospace; color: #C9D3E0; }
-  #wrap { position: relative; width: min(100vw, 177.78vh); aspect-ratio: 16 / 9; }
+  #wrap { position: relative; width: min(100vw, 177.78vh); width: min(100vw, 177.78dvh); aspect-ratio: 16 / 9; }
+
+  /* ===== Телефон: джойстик и кнопки (видны только на сенсорных экранах) ===== */
+  #touch { display: none; position: fixed; inset: 0; z-index: 20; pointer-events: none; }
+  body.touch #touch { display: block; }
+  body.touch, body.touch * { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body.touch { touch-action: none; }
+  #touch.off .ctl { display: none; }
+  #stick { position: absolute; left: max(16px, env(safe-area-inset-left)); bottom: 16px; width: 130px; height: 130px;
+           border-radius: 50%; background: rgba(201,211,224,.08); border: 2px solid rgba(201,211,224,.3);
+           pointer-events: auto; touch-action: none; }
+  #knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%;
+          background: rgba(201,211,224,.35); border: 2px solid #C9D3E0; }
+  .tbtn { position: absolute; width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+          font: 26px 'VT323', monospace; color: #C9D3E0; background: rgba(26,20,36,.55); border: 2px solid rgba(201,211,224,.5);
+          pointer-events: auto; touch-action: none; }
+  .tbtn.down { background: rgba(201,211,224,.35); }
+  .tbtn.small { width: 48px; height: 48px; font-size: 18px; }
+  #bJump { right: max(16px, env(safe-area-inset-right)); bottom: 20px; width: 78px; height: 78px; }
+  #bUse  { right: calc(max(16px, env(safe-area-inset-right)) + 92px); bottom: 14px; }
+  #bAct  { right: calc(max(16px, env(safe-area-inset-right)) + 14px); bottom: 112px; color: #1A1424; background: #FF8A2B;
+           border-color: #C9D3E0; box-shadow: 0 0 18px #FF8A2B; }
+  #bAct.hidden { display: none; }
+  #bEmo  { right: calc(max(16px, env(safe-area-inset-right)) + 96px); bottom: 96px; }
+  #bBack { right: max(16px, env(safe-area-inset-right)); top: 16%; }
+  #rotate { display: none; position: fixed; inset: 0; z-index: 30; background: #1A1424; color: #C9D3E0;
+            align-items: center; justify-content: center; text-align: center; font: 28px 'VT323', monospace; padding: 24px; }
+  @media (orientation: portrait) { body.touch #rotate { display: flex; } }
+  body.touch .osd .bl { display: none; }
+  body.touch .osd .br { bottom: auto; top: 4%; right: 50%; transform: translateX(50%); }  /* таймкод наверх, под кнопками тесно */   /* подсказки про клавиатуру на телефоне не нужны */
   canvas { width: 100% !important; height: 100% !important; display: block; image-rendering: pixelated; }
 
   /* ===== Экран выбора ===== */
@@ -110,6 +141,15 @@
 </script>
 </head>
 <body>
+<div id="touch">
+  <div id="stick" class="ctl"><div id="knob"></div></div>
+  <div class="tbtn ctl" id="bJump">⤒</div>
+  <div class="tbtn ctl" id="bUse">✋</div>
+  <div class="tbtn ctl hidden" id="bAct">F</div>
+  <div class="tbtn small ctl" id="bEmo">☺</div>
+  <div class="tbtn small" id="bBack">ESC</div>
+</div>
+<div id="rotate">ПОВЕРНИ ТЕЛЕФОН<br>ГОРИЗОНТАЛЬНО ⟳</div>
 <div id="wrap">
   <div id="select">
     <h1>ВСТАВЬТЕ КАССЕТУ</h1>
@@ -2584,6 +2624,55 @@ function loop() {
   timecode.textContent = `${pad(Math.floor(s / 3600))}:${pad(Math.floor(s / 60) % 60)}:${pad(s % 60)}`;
   requestAnimationFrame(loop);
 }
+// ---------------------------------------------------------------------
+//  ТЕЛЕФОН: джойстик (= WASD) и кнопки (= клавиши). Кнопки шлют те же
+//  события клавиатуры, поэтому вся остальная игра про телефон не знает.
+// ---------------------------------------------------------------------
+if (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window) {
+  document.body.classList.add('touch');
+  const touchEl = document.getElementById('touch');
+  const press = (code, down) => dispatchEvent(new KeyboardEvent(down ? 'keydown' : 'keyup', { code, bubbles: true }));
+  const button = (id, onDown, onUp) => {
+    const el = document.getElementById(id);
+    el.addEventListener('pointerdown', e => { e.preventDefault(); el.classList.add('down'); onDown(); });
+    const up = e => { e.preventDefault(); if (!el.classList.contains('down')) return; el.classList.remove('down'); onUp && onUp(); };
+    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up); el.addEventListener('pointerleave', up);
+  };
+  button('bJump', () => press('Space', true), () => press('Space', false));
+  button('bAct',  () => press('KeyF', true),  () => press('KeyF', false));
+  button('bEmo',  () => press('KeyJ', true),  () => press('KeyJ', false));
+  button('bBack', () => press('Escape', true), () => press('Escape', false));
+  button('bUse',  () => { audioOn(); dispatchEvent(new MouseEvent('mousedown', { button: 0 })); });
+
+  // Джойстик: направление пальца → нажатые W/A/S/D
+  const stick = document.getElementById('stick'), knob = document.getElementById('knob');
+  const held = { KeyW: false, KeyA: false, KeyS: false, KeyD: false };
+  let stickId = null;
+  const setDir = (dx, dy) => {
+    const want = { KeyW: dy < -0.35, KeyS: dy > 0.35, KeyA: dx < -0.35, KeyD: dx > 0.35 };
+    for (const k in want) if (want[k] !== held[k]) { held[k] = want[k]; press(k, want[k]); }
+  };
+  const moveStick = e => {
+    const r = stick.getBoundingClientRect(), R = r.width / 2;
+    let dx = (e.clientX - r.left - R) / R, dy = (e.clientY - r.top - R) / R;
+    const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
+    knob.style.transform = `translate(${dx * R * 0.6}px, ${dy * R * 0.6}px)`;
+    setDir(dx, dy);
+  };
+  stick.addEventListener('pointerdown', e => { e.preventDefault(); stickId = e.pointerId; try { stick.setPointerCapture(e.pointerId); } catch {} audioOn(); moveStick(e); });
+  stick.addEventListener('pointermove', e => { if (e.pointerId === stickId) moveStick(e); });
+  const release = e => { if (e.pointerId !== stickId) return; stickId = null; knob.style.transform = ''; setDir(0, 0); };
+  stick.addEventListener('pointerup', release); stick.addEventListener('pointercancel', release);
+
+  // Что показывать: в меню и в слотах управление прячем, «F» — только когда есть что нажать
+  setInterval(() => {
+    const playing = current !== null && !slotMode;
+    touchEl.classList.toggle('off', !playing);
+    document.getElementById('bBack').style.display = current !== null ? '' : 'none';
+    document.getElementById('bAct').classList.toggle('hidden', promptEl.classList.contains('hidden'));
+  }, 150);
+}
+
 loop();
 </script>
 </body>
