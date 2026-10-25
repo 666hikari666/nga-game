@@ -35,6 +35,9 @@
   #bAct.hidden { display: none; }
   #bEmo  { right: calc(max(16px, env(safe-area-inset-right)) + 96px); bottom: 96px; }
   #bBack { right: max(16px, env(safe-area-inset-right)); top: 16%; }
+  #bReload, #bZoomIn { right: max(16px, env(safe-area-inset-right)); top: calc(16% + 62px); }
+  #bZoomOut { right: max(16px, env(safe-area-inset-right)); top: calc(16% + 124px); }
+  .tbtn.hidden { display: none; }
   #rotate { display: none; position: fixed; inset: 0; z-index: 30; background: #1A1424; color: #C9D3E0;
             align-items: center; justify-content: center; text-align: center; font: 28px 'VT323', monospace; padding: 24px; }
   @media (orientation: portrait) { body.touch #rotate { display: flex; } }
@@ -148,6 +151,9 @@
   <div class="tbtn ctl hidden" id="bAct">F</div>
   <div class="tbtn small ctl" id="bEmo">☺</div>
   <div class="tbtn small" id="bBack">ESC</div>
+  <div class="tbtn small hidden" id="bReload">R</div>
+  <div class="tbtn small hidden" id="bZoomIn">+</div>
+  <div class="tbtn small hidden" id="bZoomOut">−</div>
 </div>
 <div id="rotate">ПОВЕРНИ ТЕЛЕФОН<br>ГОРИЗОНТАЛЬНО ⟳</div>
 <div id="wrap">
@@ -2643,6 +2649,22 @@ if (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window) {
   button('bEmo',  () => press('KeyJ', true),  () => press('KeyJ', false));
   button('bBack', () => press('Escape', true), () => press('Escape', false));
   button('bUse',  () => { audioOn(); dispatchEvent(new MouseEvent('mousedown', { button: 0 })); });
+  button('bReload', () => press('KeyR', true), () => press('KeyR', false));
+  const zoom = k => { if (view?.type === 'scope') view.fov = Math.max(3, Math.min(45, view.fov * k)); };
+  button('bZoomIn',  () => zoom(0.7));
+  button('bZoomOut', () => zoom(1.4));
+
+  // Палец по экрану = мышь: тап — клик (прицел, комп, Тарков), перетаскивание — осмотр в телескопе
+  const touchMouse = (type, e) => dispatchEvent(new MouseEvent(type, { clientX: e.clientX, clientY: e.clientY, button: 0, bubbles: true }));
+  let fingerId = null;
+  wrapEl.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch' || fingerId !== null || current === null || slotMode) return;
+    e.preventDefault(); fingerId = e.pointerId; audioOn();
+    touchMouse('mousemove', e); touchMouse('mousedown', e);
+  });
+  wrapEl.addEventListener('pointermove', e => { if (e.pointerId === fingerId) touchMouse('mousemove', e); });
+  const fingerUp = e => { if (e.pointerId !== fingerId) return; fingerId = null; touchMouse('mouseup', e); };
+  wrapEl.addEventListener('pointerup', fingerUp); wrapEl.addEventListener('pointercancel', fingerUp);
 
   // Джойстик: направление пальца → нажатые W/A/S/D
   const stick = document.getElementById('stick'), knob = document.getElementById('knob');
@@ -2670,6 +2692,9 @@ if (matchMedia('(pointer: coarse)').matches || 'ontouchstart' in window) {
     touchEl.classList.toggle('off', !playing);
     document.getElementById('bBack').style.display = current !== null ? '' : 'none';
     document.getElementById('bAct').classList.toggle('hidden', promptEl.classList.contains('hidden'));
+    document.getElementById('bReload').classList.toggle('hidden', view?.type !== 'shoot');
+    document.getElementById('bZoomIn').classList.toggle('hidden', view?.type !== 'scope');
+    document.getElementById('bZoomOut').classList.toggle('hidden', view?.type !== 'scope');
   }, 150);
 }
 
